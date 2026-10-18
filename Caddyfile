@@ -1,0 +1,7 @@
+{$DOMAIN} {
+  encode zstd gzip
+  reverse_proxy app:3000 {
+    # Flush SSE events immediately instead of waiting for a proxy buffer.
+    flush_interval -1
+  }
+}
