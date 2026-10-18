@@ -83,4 +83,4 @@ npm audit --omit=dev --audit-level=high
 
 The original SQLite server and its integration tests remain as a self-hosted reference/regression fixture. **The Netlify deployment uses the Supabase backend, not `server/`.** The legacy server does not implement the hosted seven-day retention policy and should not be used for this production configuration. Docker/Compose files describe that earlier self-hosted option only.
 
-Actual two-device audio, phone camera behavior, locked-screen notification delivery, and visual browser QA require verification on the deployed website/devices; DOM/API tests do not establish those results.
+Actual two-device audio, phone camera behavior, locked-screen notification delivery, and visual browser QA require verification on the deployed website/devices; DOM/API tests do not establish those results
