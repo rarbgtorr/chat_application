@@ -1,113 +1,80 @@
 # Wingfactor Support Chat
 
-A private, responsive support workspace for clients, teammates, and the administrator. Clients get a private chat link; teammates see a client ID and only their assigned conversations. Both sides can send text, images, videos, audio, voice recordings, PDFs, Word documents, TXT, and CSV files.
+Private client support chat, designed for **Netlify Free + Supabase Free**. GitHub preserves the source; Netlify serves the website and proxies its API; Supabase runs the API, database, realtime updates, private file storage, push delivery, and scheduled jobs.
 
-## Implemented behaviour
+## Behaviour
 
-- **Server-enforced privacy:** client name, contact, and admin notes live in a separate table. These fields are omitted from teammate and client API responses. No teammate can list users, change assignments, generate client links, or delete rooms.
-- **Private client access:** 256-bit access secret in the URL fragment, exchanged for an HttpOnly cookie. Secrets are hashed in storage and removed from the address bar. Anyone holding the original link has access; share it privately. Replacement/revocation invalidates existing client links, sessions, and push subscriptions.
-- **Persistent staff sign-in:** no server inactivity timeout. Browser cookie persists for a rolling year (subject to browser limits). Sessions remain valid across server restarts. Manual logout, password changes, admin revocation, or browser-data removal require sign-in again. Never promise that a browser will retain a cookie forever.
-- **Live chat:** server-sent events trigger immediate reconciliation; standard authenticated requests save messages. Reconnection, tab visibility, and a 30-second safety refresh recover missed events. Retries use message nonces to avoid duplicate messages.
-- **Background Web Push:** a service worker can notify registered devices without an open chat tab. Multiple phone/laptop subscriptions per user are supported. Subscriptions are tied to a server session; logging out or revoking a session removes its subscriptions and pending push jobs. Notification payloads use client IDs and generic text, without contact data or attachment names.
-- **Escalation:** the first unanswered client message starts a durable cycle. Additional client messages do not reset it. At **5 minutes**, notify assigned active teammates. At **10 minutes**, notify active administrators. Reading does not stop the timer. Any staff reply, including a file-only reply, ends the cycle and cancels pending reminders/escalations. A new client message after a reply starts a new cycle. Worker checks every second; actual push delivery may take longer.
-- **Durable history:** messages, media, sessions, push jobs, and escalation deadlines persist in `DATA_DIR`. There is no automatic message or attachment expiry. Closed rooms are read-only and retain history. Only an administrator can permanently delete a room.
-- **Direct media:** no admin approval step. Maximum file size: **25 MB per attachment**. Voice recordings stop after three minutes and are sent only when the user presses Send. PDFs/documents download; supported image/audio/video files have inline previews. Media uses authenticated endpoints, not public upload URLs.
-- **Room controls:** assign multiple teammates, reassign without losing history, edit admin-only contact notes, close/reopen, replace/revoke access, permanently delete. Add, disable, re-enable, and reset teammate accounts. Only the command-line admin tool creates additional administrators.
+- Clients open a private link. Teammates sign in and see assigned client IDs. Only administrators can see stored client names, contacts, and private notes.
+- Text, images, videos, audio, voice notes, PDFs, Word, TXT, and CSV files reach recipients directly. Maximum attachment size: **25 MB**.
+- Attachments expire **7 days after upload**. Access stops at expiry; the scheduled worker deletes the object, normally on the next minute pass. Deletion failures stay queued for retry. Chat history shows **Attachment expired**. Text messages remain until the administrator deletes the conversation.
+- Staff sessions have no server inactivity timeout; a persistent HttpOnly, Secure, SameSite cookie renews on requests. Explicit logout, password changes, access revocation, and clearing browser storage can end access. Push is independent of an open chat connection.
+- The first unanswered client message starts a cycle. Additional client messages do not restart it. At **5 minutes**, remind assigned teammates. At **10 minutes**, notify administrators. Any staff reply, including a file-only reply, ends the cycle and cancels pending escalation jobs. Reading a message does not count as replying.
+- Room assignment, reassignment, close/reopen, client-link replacement/revocation, permanent room deletion, staff disable/reset, and multi-device notification registration are included.
+- Voice notes are recorded for up to three minutes, then shared only when Send is pressed.
 
-Identity details inside messages, recordings, file contents, and filenames are visible to the recipient by design. There is no content redaction or end-to-end encryption: the trusted server stores and processes the conversation.
+Identity inside messages, filenames, recordings, or document contents remains visible by design. The server processes messages; this is not end-to-end encryption.
 
-## Local setup
+## Current deployment resources
 
-Requires **Node.js 24.15+ (24.x)** and npm. `node:sqlite` is built into this Node version. The runtime dependency is `web-push`.
+- Netlify project: `wingfactor-support-chat` (site ID `370880c6-bc6f-4a7c-afe4-5f6899e3e2c2`).
+- Expected website origin: `https://wingfactor-support-chat.netlify.app`.
+- Supabase project: existing `interview-support-slot-booking` (`nmgjkexfgytjivxudsmo`) on the confirmed Free organisation. Chat uses separate `wc_` tables, the `wingchat` function, `wingchat-worker` job, and private `wingchat-media` bucket. The booking app's tables and functions are separate. Resources/quotas are shared.
+- `netlify.toml` builds `dist/`, proxies `/api/*` to the chat function, and provides the client room fallback plus security headers. No secret environment variable is needed in the frontend.
+
+The Netlify project has to be linked to this GitHub repository (main branch) and published before the website is usable. Set production visitor access to Public; application accounts and private client links protect chat data. The account's default Netlify team-login gate must not block clients or service-worker notifications. Preview deployments should use a separate backend/configuration, because writes accept only the configured production origin.
+
+## Security model
+
+Every chat table has RLS enabled, explicit deny policies, and revoked privileges for `anon` and `authenticated`. All chat RPCs are executable only by `service_role`. The Edge Function owns the privileged key through Supabase's built-in server environment and checks the hashed custom session and room assignment on every operation. Private contact records are fetched only in administrator requests.
+
+Staff passwords use salted **PBKDF2-HMAC-SHA256, 600,000 iterations** through Web Crypto. Session and client-link secrets have 256 bits of randomness and are stored as SHA-256 hashes. Setup uses a one-time hashed secret and expiry, with a transaction preventing reuse. Client links use URL fragments, which are exchanged for cookies and removed from the address bar. Share links privately: anyone holding a valid link has client access.
+
+Realtime uses random per-session notification topics. Broadcasts carry **only an empty wake-up event**, never messages, contacts, or attachments. A wake-up causes the browser to fetch authorized data from the API. Possessing a realtime topic does not grant API access. Session revocation removes the topic from future recipients. Browser publishable keys cannot read chat tables, storage objects, or chat RPCs directly.
+
+Private media is served through short signed URLs after authorization, with lifetime bounded by its seven-day expiry. Do not share signed URLs: they remain usable until their short expiry. Already downloaded client files cannot be recalled.
+
+## Background jobs
+
+`wingchat-worker` invokes `/functions/v1/wingchat/worker` every minute via `pg_cron` + `pg_net`, authenticated with a random server-only worker secret. Worker/configuration secrets and stable VAPID keys live in the access-restricted `wc_settings` table; none are committed here. The Edge Function handles its own authentication, so platform JWT verification is disabled for this function only.
+
+The worker processes durable reminder cycles, claims push jobs using leases, retries transient push failures with backoff, removes invalid push endpoints, and expires/removes media. Message sends also launch a background worker pass for prompt new-message alerts. Push subscriptions are tied to server sessions; logout/revocation cascades pending jobs. Database message insertion and response-cycle updates are atomic and serialize per room.
+
+Cron checks run once per minute: a reminder is eligible at the five/ten-minute threshold and processed on the next check. Device/network delivery can add delay. A notification already accepted by a push service cannot be recalled. Push-service acceptance is not proof that a phone displayed an alert.
+
+## Free-plan limits
+
+The organisation/project must stay on Free and no paid add-ons should be enabled. Current published allowances include 500 MB database, 1 GB file storage, and 2 million realtime messages/month; Netlify Free is subject to its account allowance. Verify current limits in provider dashboards. Other apps on the same account/project share applicable quotas.
+
+Upload reservations are serialized and reject new files if total project storage plus reservations would exceed **900 MiB**, leaving headroom under the storage quota. This is a file-upload safeguard, not a guarantee for every metered resource. Monitor database size, realtime usage, requests, bandwidth, and storage. Keeping attachments seven days does not cap how much can be uploaded during that week.
+
+Free projects may pause or reach usage limits; free plans do not provide guaranteed uninterrupted service. No paid project was created for this chat app. Backups and any copies downloaded by recipients have their own retention rules.
+
+## Deploy and configure
+
+1. Apply the SQL in `supabase/migrations/` to a chosen Supabase project. Do not apply the migrations twice. The current project's migrations are already applied.
+2. Configure the access-restricted `wc_settings` entries: `config` contains origin, public/publishable key, VAPID keys, contact URI, and worker secret. `setup` contains the hash of a random one-time setup key and its millisecond expiry. Never commit these values or expose server keys in client bundles.
+3. Deploy `supabase/functions/wingchat/index.ts` with its `core.js` dependency, with `verify_jwt = false` because it enforces its own cookies/worker authentication. `SUPABASE_SECRET_KEYS.default` or the built-in `SUPABASE_SERVICE_ROLE_KEY` is server-only.
+4. Schedule the minute worker using a server-side secret; existing project job is already configured.
+5. Link the Netlify project to this GitHub repo, production branch `main`. Build: `npm run build`; publish: `dist`. Netlify connection state is ignored in Git via `.netlify/`.
+6. Once published, open the private one-time `/#setup=...` link to create your admin account, then add teammates and create client rooms. The setup secret is not stored in the repository. It can be reissued by the server owner if it expires before first use.
+7. On each phone/laptop, open Settings → Enable notifications → Send test alert. Test with the screen locked and app backgrounded. iOS/iPadOS needs a supported Home Screen installation for Web Push.
+
+Changing the website origin requires updating the server-only config and any proxy/CSP settings. Keep the VAPID keys stable so devices do not need to resubscribe. Never disable secret scanning to ship a real secret.
+
+## Build and checks
+
+Requires Node.js 24.15+ (24.x).
 
 ```bash
 npm ci --ignore-scripts
-cp .env.example .env
-npm run create-admin
-npm start
-```
-
-The admin command prompts for a username, display name, and hidden password (minimum 14 characters). There are no default credentials or public staff signup. Open `http://localhost:3000`. Set `PUSH_CONTACT=mailto:your-real-address@your-domain.com` to enable Web Push. HTTPS is required for notifications outside localhost.
-
-For automation, the admin script also accepts `{ "username", "name", "password" }` as JSON on standard input. Supply secrets through your host’s secret manager or a protected stdin stream, never in repository files or command-line arguments.
-
-### First use
-
-1. Sign in as administrator.
-2. Open **Your team → Add teammate**. Share credentials privately.
-3. Create a conversation; fill optional admin-only details and assign teammates.
-4. Copy the generated client link and send it through WhatsApp. The link is shown only when created; a replacement revokes the previous link.
-5. Teammates sign in at the main URL. Clients open their private link. Use separate browser profiles/devices when testing both roles; a browser profile has one active account.
-6. Each participant opens **Settings → Enable notifications → Send test alert** on every device they use.
-
-On mobile, add the app to the Home Screen where supported. On iPhone/iPad, Web Push requires a supported installed Home Screen web app. The app can be used from the browser without installing, but platform push support varies.
-
-## Production deployment
-
-This application needs **one always-on Node process with a persistent disk**, HTTPS, and outbound HTTPS to browser push services. A static deployment, a sleeping free service, an ephemeral container filesystem, or a request-only serverless function is not sufficient. The timer worker runs inside the Node process. Run **one application instance**; do not horizontally scale this SQLite/in-process SSE design.
-
-The repository includes a Dockerfile and Docker Compose deployment with Caddy TLS and a persistent volume. On your server:
-
-1. Point a domain/subdomain at the server and allow inbound ports 80 and 443.
-2. Clone this repository and create a protected `.env` file:
-
-```dotenv
-DOMAIN=support.your-domain.com
-PUSH_CONTACT=mailto:you@your-domain.com
-```
-
-3. Run `docker compose up -d --build`.
-4. Create the administrator interactively:
-
-```bash
-docker compose exec app node scripts/create-admin.js
-```
-
-5. Visit the HTTPS domain and complete the first-use steps above. Alternatively, set `ADMIN_USERNAME` and `ADMIN_PASSWORD` in the host’s environment for the first boot only, then remove them. They are used only when the user database is empty.
-
-`compose.yaml` mounts a named `chat_data` volume at `/app/data`; it includes SQLite, uploads, and stable VAPID keys. **Do not delete this volume or regenerate `vapid.json` during upgrades.** Changing the public VAPID key requires devices to resubscribe.
-
-For a managed host instead of Compose, use the Dockerfile, attach persistent storage at `/app/data`, set `APP_URL` to the exact HTTPS origin and `PUSH_CONTACT`, and keep the service running continuously. Set proxy buffering off for `/api/events`; Caddy is already configured to flush promptly. Do not put client access tokens in a URL query string or proxy log.
-
-### Railway settings
-
-Deploy the repository's Dockerfile as one Railway service. Attach a volume at `/app/data` **before** first use and keep one replica. Railway volumes are mounted as root; with this Dockerfile, use `RAILWAY_RUN_UID=0` as Railway's documented volume-permission workaround, or arrange ownership for the `node` UID before starting. Set `APP_URL` to the generated HTTPS service domain, `PUSH_CONTACT` to a real `mailto:` contact or an HTTPS contact URL, and healthcheck path to `/healthz`. Disable **Serverless/App Sleeping**: the reminder worker must keep running when nobody is using the app. Do not deploy the Caddy Compose service on Railway; its public proxy handles TLS.
-
-Choose restart settings supported by your account/plan. Hosting and persistent disk can incur charges; confirm the provider's plan and usage limits before activating production hosting. Railway installation alone does not create a deployed application.
-
-### Notifications and fast response
-
-- Notification permission, internet, browser support, device power settings, and Do Not Disturb affect delivery. Keeping the user signed in does not guarantee immediate OS notifications. Push acceptance is not proof that the phone displayed an alert.
-- Test on the actual teammate/admin devices with the screen locked and the chat backgrounded. Verify both the 5-minute teammate reminder and the 10-minute admin escalation. These device tests have to happen after HTTPS deployment.
-- Browser push and live chat are separate. The server worker can send push when there is no live SSE connection; it does not require a chat tab to be open.
-- Pending jobs survive restarts. Failed sends retry with backoff for up to 24 hours. Gone/invalid endpoints (404/410) are removed. Notifications may be delivered more than once if the server stops after a push service accepts a request but before recording success.
-- An outage delays reminders; the first worker pass after recovery catches up against the original timestamps. Closed/deleted rooms and revoked access stop their pending escalations. A notification already handed to a push service cannot be recalled.
-- The allowlist in `validPushEndpoint()` supports standard Chrome/FCM, Firefox/Mozilla, and Apple endpoints. Unsupported browser push providers require an explicit reviewed allowlist addition.
-
-### Persistence, backup, and deletion
-
-There is no retention timer. Storage grows until the administrator deletes rooms. Monitor disk space. An uploaded file that was never sent is still retained within its room until room deletion.
-
-Back up the **complete data directory**, including uploads and VAPID keys. Use SQLite’s backup API or stop the application while copying the directory; copying only the live `.sqlite` file without its WAL is unsafe. Restore the directory and its ownership before starting a replacement instance. Backups are separate copies: apply your own backup retention/deletion policy when deleting a client’s data.
-
-Teammates/clients cannot delete saved history. Account revocation does not erase history. Deleting a room removes its records and files from active application storage. File deletion failures remain in a durable retry queue for the background worker. No contacts, credentials, session secrets, message bodies, or private access links are written to application logs.
-
-## Checks
-
-```bash
+npm run build
 npm run check
 npm test
 npm audit --omit=dev --audit-level=high
 ```
 
-Tests use real local HTTP requests and temporary SQLite databases. They cover privacy and authorization, bidirectional/idempotent messaging, direct media access/ranges, history pagination, exact escalation thresholds, reply cancellation, reassignment, access revocation, long-lived sessions, room deletion, CSRF rejection, push endpoint restrictions, restart persistence, and SSE events. Push delivery is mocked in the tests; real phone delivery and visual/browser QA remain deployment acceptance checks.
+`test/interface.test.js` checks the UI, escaping, client link handling, admin controls, and preservation of media/drafts during updates. `scripts/verify-hosted.js` is a manual live acceptance test that takes temporary test credentials through hidden stdin; it covers the deployed API, sessions, privacy, access control, WebSocket events, message retries, direct media, and replies. Live test users/rooms must be removed after verification.
 
-GitHub Actions runs syntax checks, tests, and the production dependency audit on pushes and pull requests.
+The original SQLite server and its integration tests remain as a self-hosted reference/regression fixture. **The Netlify deployment uses the Supabase backend, not `server/`.** The legacy server does not implement the hosted seven-day retention policy and should not be used for this production configuration. Docker/Compose files describe that earlier self-hosted option only.
 
-## Primary technical references
-
-- [Node.js SQLite](https://nodejs.org/docs/latest-v24.x/api/sqlite.html)
-- [MDN server-sent events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)
-- [MDN Push API](https://developer.mozilla.org/en-US/docs/Web/API/Push_API)
-- [Web Push for Node.js](https://github.com/web-push-libs/web-push)
-- [WebKit: Web Push for web apps on iOS/iPadOS](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/)
+Actual locked-screen phone notification delivery and visual browser QA require verification on the deployed website/devices; DOM/API tests do not establish those results.

@@ -90,3 +90,14 @@ test('administrator can reach private room settings and assignment controls', as
   assert.equal(f.document.querySelector('.conversation').textContent.includes('SECRET-PHONE'), false);
   assert.ok(f.document.querySelector('[data-action="create-room"]'));
 });
+
+test('expired media keeps its message and shows an expiry marker without a download link', async t => {
+  const f = await ui(t);
+  f.messages.push({ id: 'expired-message', seq: 1, body: 'Please review this document.', sender: 'Client #ABC123',
+    own: false, created_at: Date.now(), attachment_id: 'expired-file', attachment_expired: true,
+    filename: 'old.pdf', mime: 'application/pdf', size: 123 });
+  await f.window.refresh();
+  assert.match(f.document.querySelector('.bubble').textContent, /Please review this document/);
+  assert.match(f.document.querySelector('.attachment').textContent, /Attachment expired/);
+  assert.equal(f.document.querySelector('.attachment a'), null);
+});

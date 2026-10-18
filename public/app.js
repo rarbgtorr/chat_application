@@ -45,6 +45,16 @@ function auth(error = '') {
   const clientPage = location.pathname.startsWith('/c/');
   $('#app').innerHTML = `<main class="auth"><section class="auth-story">${brand}<div class="eyebrow">A little closer. A lot simpler.</div><h1>Good support<br>starts with a<br><em>conversation.</em></h1><p>One private space for your questions, files, and the people here to help.</p><div class="auth-foot">WINGFACTOR IT SUPPORT<br>Thoughtful support. Connected people.</div></section><section class="auth-form"><div class="auth-form-inner">${clientPage ? `<h2>Your private support space</h2><p>Open the original support link shared with you to access your conversation. If your access was revoked, ask Wingfactor for a new link.</p><div class="error">${esc(error)}</div>` : `<div class="eyebrow muted">Team workspace</div><h2>Welcome back.</h2><p>Sign in to pick up your conversations.</p><form id="login-form"><label class="field"><span>Username</span><input name="username" autocomplete="username" required placeholder="Your team username"></label><label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required placeholder="Enter your password"></label><div class="error" id="login-error">${esc(error)}</div><button class="primary" type="submit">Sign in ${icon('send')}</button></form><div class="auth-note">You’ll stay signed in on this device.<br>Clients: use the private link shared with you.</div>`}</div></section></main>`;
 }
+function setupScreen(key) {
+  auth();
+  $('.auth-form-inner').innerHTML = `<div class="eyebrow muted">First-time setup</div><h2>Your support workspace.</h2><p>Create your administrator account. This setup link can be used once.</p><form id="setup-form"><label class="field"><span>Admin username</span><input name="username" value="owner" autocomplete="username" pattern="[a-zA-Z0-9_.@-]{3,100}" required></label><label class="field"><span>Password · at least 14 characters</span><input name="password" type="password" minlength="14" maxlength="200" autocomplete="new-password" required></label><div class="error form-error"></div><button class="primary" type="submit">Create administrator account</button></form>`;
+  $('#setup-form').addEventListener('submit', async event => {
+    event.preventDefault(); event.stopImmediatePropagation();
+    const button = event.target.querySelector('button'); button.disabled = true; button.textContent = 'Creating account…';
+    try { await post('/api/setup', { ...Object.fromEntries(new FormData(event.target)), key }); await boot(); }
+    catch (error) { event.target.querySelector('.form-error').textContent = error.message; button.disabled = false; button.textContent = 'Create administrator account'; }
+  });
+}
 function rail() {
   const client = state.me.role === 'client';
   return `<aside class="rail">${brand}<p class="nav-label">WORKSPACE</p><button class="nav-item active" data-action="conversations">${icon('chat')}<span>Conversations</span></button>${!client ? `<button class="nav-item" data-action="alerts">${icon('bell')}<span>Notifications</span><span class="count hidden" id="alert-count">0</span></button>` : ''}${state.me.role === 'admin' ? `<button class="nav-item" data-action="team">${icon('team')}<span>Your team</span></button>` : ''}<button class="nav-item" data-action="settings">${icon('settings')}<span>Settings</span></button><div class="rail-note"><strong>${client ? 'A space just for you.' : 'Every conversation matters.'}</strong>${client ? 'Send a message or share a file. Your support team is here to help.' : 'Reply with care. Keep your notifications on so no client is left waiting.'}</div><div class="profile"><span class="avatar">${client ? 'C' : initials(state.me.name)}</span><div>${esc(state.me.name)}<small>${client ? 'Private conversation' : state.me.role === 'admin' ? 'Administrator' : 'Support teammate'}</small></div>${!client ? iconButton('logout', 'logout', 'Sign out') : ''}</div></aside>`;
@@ -83,12 +93,14 @@ function renderMessages(prepend = false) {
     const day = formatDay(message.created_at); let divider = '';
     if (day !== lastDay) { lastDay = day; divider = `<div class="day-divider" data-key="day-${esc(day)}">${esc(day)}</div>`; }
     let attachment = '';
-    if (message.attachment_id) {
+    if (message.attachment_id && message.attachment_expired) {
+      attachment = `<div class="attachment"><span class="small">Attachment expired · deleted after 7 days</span></div>`;
+    } else if (message.attachment_id) {
       const src = `/api/media/${message.attachment_id}`;
       const preview = message.mime?.startsWith('image/') ? `<a href="${src}" target="_blank" rel="noopener"><img src="${src}" alt="${esc(message.filename)}" loading="lazy"></a>` : message.mime?.startsWith('video/') ? `<video src="${src}" controls preload="metadata"></video>` : message.mime?.startsWith('audio/') ? `<audio src="${src}" controls preload="metadata"></audio>` : '';
       attachment = `<div class="attachment">${preview}<a href="${src}?download=1" download>${icon('file')} ${esc(message.filename)}</a><small>${(message.size / 1024 / 1024).toFixed(2)} MB · Download</small></div>`;
     }
-    return `${divider}<article data-key="${message.id}" class="message ${message.own ? 'own' : ''}"><div class="message-meta"><span>${esc(message.own ? 'You' : message.sender)}</span><time>${formatTime(message.created_at)}</time></div><div class="bubble">${esc(message.body)}${attachment}</div></article>`;
+    return `${divider}<article data-key="${message.id}-${Boolean(message.attachment_expired)}" class="message ${message.own ? 'own' : ''}"><div class="message-meta"><span>${esc(message.own ? 'You' : message.sender)}</span><time>${formatTime(message.created_at)}</time></div><div class="bubble">${esc(message.body)}${attachment}</div></article>`;
   }).join('');
   const template = document.createElement('template');
   template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(room?.code)}. Send a message to get started.`}</p></div>`}`;
@@ -118,7 +130,7 @@ async function loadMessages(roomId, before) {
   const result = await api(`/api/rooms/${roomId}/messages${before ? `?before=${before}` : ''}`);
   if (state.roomId !== roomId) return;
   const previousLast = state.messages.at(-1)?.seq;
-  const oldSignature = state.messages.map(m => m.id).join(',');
+  const oldSignature = state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}`).join(',');
   if (before) state.messages = [...result.messages, ...state.messages];
   else {
     // Retain previously loaded pages when realtime refresh fetches the most recent page.
@@ -126,7 +138,7 @@ async function loadMessages(roomId, before) {
     state.messages = [...state.messages.filter(m => m.seq < first), ...result.messages];
   }
   if (before || state.messages.length <= 100) state.hasMore = result.hasMore;
-  if (oldSignature !== state.messages.map(m => m.id).join(',') || !$('#messages')?.querySelector('.message')) renderMessages(Boolean(before));
+  if (oldSignature !== state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}`).join(',') || !$('#messages')?.querySelector('.message')) renderMessages(Boolean(before));
   if (!before && previousLast && state.messages.at(-1)?.seq > previousLast && !state.messages.at(-1).own) beep();
   if (!document.hidden && state.messages.length) {
     await post(`/api/rooms/${roomId}/read`, { seq: state.messages.at(-1).seq });
@@ -162,8 +174,18 @@ async function refresh() {
     else { connection(false); }
   } finally { state.loading = false; if (state.queuedRefresh) { state.queuedRefresh = false; void refresh(); } }
 }
-function startEvents() {
-  state.stream?.close(); const stream = new EventSource('/api/events'); state.stream = stream;
+async function startEvents() {
+  state.stream?.close();
+  if (state.realtime) {
+    try {
+      const { connect } = await import('/realtime.js');
+      state.stream = connect(state.realtime, () => {
+        clearTimeout(refreshTimer); refreshTimer = setTimeout(() => void refresh(), 100);
+      }, status => { connection(status === 'SUBSCRIBED'); if (status === 'SUBSCRIBED') void refresh(); });
+    } catch { connection(false); }
+    return;
+  }
+  const stream = new EventSource('/api/events'); state.stream = stream;
   stream.addEventListener('connected', () => { connection(true); void refresh(); });
   for (const type of ['change', 'alert']) stream.addEventListener(type, () => {
     clearTimeout(refreshTimer); refreshTimer = setTimeout(() => void refresh(), 100);
@@ -179,6 +201,8 @@ function beep() {
 }
 async function boot() {
   try {
+    const setup = new URLSearchParams(location.hash.slice(1)).get('setup');
+    if (setup) { history.replaceState(null, '', '/'); setupScreen(setup); return; }
     const key = new URLSearchParams(location.hash.slice(1)).get('key');
     if (key) {
       // Remove the bearer link secret from the address bar before any other app requests.
@@ -186,7 +210,7 @@ async function boot() {
       const result = await post('/api/client/session', { key });
       history.replaceState(null, '', `/c/${result.roomId}`);
     }
-    const result = await api('/api/me'); state.me = result.user; state.push = result.push;
+    const result = await api('/api/me'); state.me = result.user; state.push = result.push; state.realtime = result.realtime;
     state.rooms = await api('/api/rooms');
     state.roomId = state.me.role === 'client' ? state.me.roomId : new URLSearchParams(location.search).get('room');
     if (!selectedRoom()) state.roomId = null;

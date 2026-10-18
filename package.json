@@ -10,13 +10,16 @@
     "start": "node --env-file-if-exists=.env server/index.js",
     "dev": "node --env-file-if-exists=.env --watch server/index.js",
     "test": "node --test --test-concurrency=1",
-    "check": "node --check server/app.js && node --check server/store.js && node --check public/app.js && node --check public/sw.js",
-    "create-admin": "node --env-file-if-exists=.env scripts/create-admin.js"
+    "check": "node --check server/app.js && node --check server/store.js && node --check public/app.js && node --check public/sw.js && node --check supabase/functions/wingchat/core.js",
+    "create-admin": "node --env-file-if-exists=.env scripts/create-admin.js",
+    "build": "node scripts/build.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "2.118.0",
     "web-push": "3.6.7"
   },
   "devDependencies": {
-    "jsdom": "^30.1.3"
+    "esbuild": "0.28.2",
+    "jsdom": "30.1.3"
   }
 }

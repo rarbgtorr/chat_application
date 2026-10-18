@@ -3,3 +3,7 @@ data/
 .env
 *.log
 coverage/
+
+.netlify/
+dist/
+supabase/.temp/

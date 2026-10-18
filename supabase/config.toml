@@ -1,0 +1,4 @@
+project_id = "wingfactor-support-chat"
+
+[functions.wingchat]
+verify_jwt = false
