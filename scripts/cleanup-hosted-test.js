@@ -1,0 +1,5 @@
+import{createInterface}from'node:readline';import assert from'node:assert/strict';
+if(process.stdin.isTTY)process.stdin.setRawMode(true);const reader=createInterface({input:process.stdin,terminal:false});console.log('Ready for hidden cleanup configuration');const c=await new Promise(resolve=>reader.once('line',v=>resolve(JSON.parse(v))));reader.close();
+const base='https://wingfactor-support-chat.netlify.app/api';
+async function call(path,method='GET'){const r=await fetch(base+path,{method,headers:{Origin:'https://wingfactor-support-chat.netlify.app',Cookie:c.cookie},signal:AbortSignal.timeout(30000)});return{status:r.status,body:await r.json()};}
+try{const rooms=await call('/rooms');assert.equal(rooms.status,200);let removed=0;for(const room of rooms.body.filter(r=>r.private?.name==='SECRET QA CLIENT')){assert.equal((await call('/rooms/'+room.id,'DELETE')).status,200);removed++;}console.log(JSON.stringify({ok:true,testRoomsRemoved:removed}));}catch(e){console.log(JSON.stringify({ok:false,error:e.message}));process.exitCode=1;}process.exit(process.exitCode||0);

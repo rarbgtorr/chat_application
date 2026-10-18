@@ -7,7 +7,7 @@ if(process.stdin.isTTY) process.stdin.setRawMode(true);
 const lines=createInterface({input:process.stdin,terminal:false});
 console.log('Ready for hidden test configuration');
 const config=await new Promise(resolve=>lines.once('line',line=>resolve(JSON.parse(line))));lines.close();
-const base='https://nmgjkexfgytjivxudsmo.supabase.co/functions/v1/wingchat';
+const base=config.base||'https://nmgjkexfgytjivxudsmo.supabase.co/functions/v1/wingchat';
 const cookies={}; const checks=[];
 async function request(who,path,method='GET',data,headers={}){
  const r=await fetch(base+path,{method,headers:{Origin:'https://wingfactor-support-chat.netlify.app',...(cookies[who]?{Cookie:cookies[who]}:{}),...(data&&!(data instanceof Uint8Array)?{'Content-Type':'application/json'}:{}),...headers},body:data?data instanceof Uint8Array?data:JSON.stringify(data):undefined,signal:AbortSignal.timeout(30000),redirect:'manual'});
