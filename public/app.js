@@ -1,6 +1,8 @@
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const icons = {
+  phone: '<path d="M22 16v3a2 2 0 0 1-2 2A19 19 0 0 1 3 4a2 2 0 0 1 2-2h3l2 5-2 2a15 15 0 0 0 7 7l2-2 5 2Z"/>',
+  camera: '<path d="M3 6h4l2-3h6l2 3h4v15H3Z"/><circle cx="12" cy="13" r="4"/>',
   chat: '<path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9H13a8.5 8.5 0 0 1 8 8v.5Z"/>',
   bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>',
   team: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/><circle cx="9" cy="7" r="4"/>',
@@ -36,12 +38,12 @@ const formatTime = value => value ? new Date(value).toLocaleTimeString([], { hou
 const formatDay = value => new Date(value).toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
 function age(value) { const minutes = Math.floor((Date.now() - value) / 60000); return minutes < 1 ? 'Just now' : minutes < 60 ? `${minutes}m` : new Date(value).toLocaleDateString([], { day: 'numeric', month: 'short' }); }
 const selectedRoom = () => state.rooms.find(room => room.id === state.roomId);
-function modal(title, content) { $('#modal-body').innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2>${iconButton('close', 'close-modal', 'Close')}</div>${content}`; if (!$('#modal').open) $('#modal').showModal(); }
+function modal(title, content) { state.media?.closeCamera(); $('#modal-body').innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2>${iconButton('close', 'close-modal', 'Close')}</div>${content}`; if (!$('#modal').open) $('#modal').showModal(); }
 function dismiss() { $('#modal').close(); }
 function initials(name) { return esc(name.split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase()); }
 
 function auth(error = '') {
-  state.stream?.close(); state.me = null;
+  state.stream?.close(); state.media?.close(); state.media=null; state.me = null;
   const clientPage = location.pathname.startsWith('/c/');
   $('#app').innerHTML = `<main class="auth"><section class="auth-story">${brand}<div class="eyebrow">A little closer. A lot simpler.</div><h1>Good support<br>starts with a<br><em>conversation.</em></h1><p>One private space for your questions, files, and the people here to help.</p><div class="auth-foot">WINGFACTOR IT SUPPORT<br>Thoughtful support. Connected people.</div></section><section class="auth-form"><div class="auth-form-inner">${clientPage ? `<h2>Your private support space</h2><p>Open the original support link shared with you to access your conversation. If your access was revoked, ask Wingfactor for a new link.</p><div class="error">${esc(error)}</div>` : `<div class="eyebrow muted">Team workspace</div><h2>Welcome back.</h2><p>Sign in to pick up your conversations.</p><form id="login-form"><label class="field"><span>Username</span><input name="username" autocomplete="username" required placeholder="Your team username"></label><label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required placeholder="Enter your password"></label><div class="error" id="login-error">${esc(error)}</div><button class="primary" type="submit">Sign in ${icon('send')}</button></form><div class="auth-note">You’ll stay signed in on this device.<br>Clients: use the private link shared with you.</div>`}</div></section></main>`;
 }
@@ -81,7 +83,7 @@ function renderChat() {
     $('#conversation').innerHTML = `<div class="chat-empty"><div class="chat-empty-inner"><span class="brand-mark">w<span>·</span></span><div class="eyebrow">Your support workspace</div><h2>A clear space.<br>A better conversation.</h2><p>Select a conversation to read messages, share files, and help your clients move forward.</p>${state.me.role === 'admin' ? `<button class="primary" data-action="create-room">${icon('plus')} Create a conversation</button>` : ''}</div></div>`;
     return;
   }
-  $('#conversation').innerHTML = `<header class="chat-header">${state.me.role !== 'client' ? `<span class="mobile-back">${iconButton('back', 'back', 'Back to conversations')}</span>` : ''}<span class="avatar">${state.me.role === 'client' ? 'W' : esc(room.code.slice(-2))}</span><div class="chat-title"><h2>${state.me.role === 'client' ? 'Wingfactor Support' : esc(room.code)}</h2><p>${state.me.role === 'client' ? 'Your private support conversation' : room.agents.length ? `Assigned to ${esc(room.agents.map(a => a.name).join(', '))}` : 'No teammate assigned'}</p></div><div class="header-actions"><span class="connection"><span class="dot"></span><span id="connection-text">Connecting…</span></span><span class="tag">${room.status === 'open' ? 'Open' : 'Closed'}</span>${iconButton('bell', 'settings', 'Notification settings')}${state.me.role === 'admin' ? iconButton('more', 'room-settings', 'Conversation settings') : ''}</div></header><div id="notification-banner"></div><div class="messages" id="messages" role="log" aria-label="Conversation messages" aria-live="polite"></div><div class="composer-wrap">${room.status === 'open' ? `<form class="composer" id="message-form"><div id="file-preview" class="file-preview hidden"></div><label class="hidden" for="message-input">Message</label><textarea id="message-input" placeholder="Write a message…" maxlength="10000"></textarea><div class="composer-bar">${iconButton('clip', 'attach', 'Attach a file')}${iconButton('mic', 'record', 'Record or stop a voice note')}<span class="composer-hint">Enter to send · Shift + Enter for a new line</span><button class="send" id="send-button" type="submit">Send ${icon('send')}</button></div><input type="file" id="file-input" class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,.mp3,.m4a,.ogg,.wav,.pdf,.doc,.docx,.txt,.csv"></form><div class="composer-footer"><span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Private support room</span><span>Messages stay until your admin deletes them.</span></div>` : `<div class="settings-note">This conversation is closed. Your history and files are still available.</div>`}</div>`;
+  $('#conversation').innerHTML = `<header class="chat-header">${state.me.role !== 'client' ? `<span class="mobile-back">${iconButton('back', 'back', 'Back to conversations')}</span>` : ''}<span class="avatar">${state.me.role === 'client' ? 'W' : esc(room.code.slice(-2))}</span><div class="chat-title"><h2>${state.me.role === 'client' ? 'Wingfactor Support' : esc(room.code)}</h2><p>${state.me.role === 'client' ? 'Your private support conversation' : room.agents.length ? `Assigned to ${esc(room.agents.map(a => a.name).join(', '))}` : 'No teammate assigned'}</p></div><div class="header-actions"><span class="connection"><span class="dot"></span><span id="connection-text">Connecting…</span></span><span class="tag">${room.status === 'open' ? 'Open' : 'Closed'}</span>${state.calls && room.status==='open' ? iconButton('phone', 'voice-call', 'Start voice call') : ''}${iconButton('bell', 'settings', 'Notification settings')}${state.me.role === 'admin' ? iconButton('more', 'room-settings', 'Conversation settings') : ''}</div></header><div id="notification-banner"></div><div class="messages" id="messages" role="log" aria-label="Conversation messages" aria-live="polite"></div><div class="composer-wrap">${room.status === 'open' ? `<form class="composer" id="message-form"><div id="file-preview" class="file-preview hidden"></div><label class="hidden" for="message-input">Message</label><textarea id="message-input" placeholder="Write a message…" maxlength="10000"></textarea><div class="composer-bar">${iconButton('clip', 'attach', 'Attach a file')}${state.calls ? iconButton('camera', 'camera', 'Take a photo') : ''}${iconButton('mic', 'record', 'Record or stop a voice note')}<span class="composer-hint">Enter to send · Shift + Enter for a new line</span><button class="send" id="send-button" type="submit">Send ${icon('send')}</button></div><input type="file" id="file-input" class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,.mp3,.m4a,.ogg,.wav,.pdf,.doc,.docx,.txt,.csv"></form><div class="composer-footer"><span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Private support room</span><span>Messages stay until your admin deletes them.</span></div>` : `<div class="settings-note">This conversation is closed. Your history and files are still available.</div>`}</div>`;
   state.file = null; renderMessages(); notificationBanner(); connection(state.connected);
 }
 function renderMessages(prepend = false) {
@@ -146,6 +148,7 @@ async function loadMessages(roomId, before) {
   }
 }
 async function selectRoom(roomId) {
+  state.media?.closeCamera(); if ($('#camera-video')) dismiss();
   if (state.recorder?.state === 'recording') return toast('Stop your voice recording before switching conversations.');
   if (state.file || $('#message-input')?.value.trim()) {
     if (!confirm('Switch conversation and discard this unsent draft?')) return;
@@ -158,7 +161,7 @@ async function refresh() {
   if (!state.me) return;
   if (state.loading) { state.queuedRefresh = true; return; } state.loading = true;
   try {
-    state.rooms = await api('/api/rooms'); renderList();
+    state.rooms = await api('/api/rooms'); renderList(); void state.media?.sync();
     if (state.roomId && !selectedRoom()) { state.roomId = null; state.messages = []; renderChat(); }
     if (state.roomId) {
       const closed = selectedRoom()?.status === 'closed';
@@ -210,7 +213,9 @@ async function boot() {
       const result = await post('/api/client/session', { key });
       history.replaceState(null, '', `/c/${result.roomId}`);
     }
-    const result = await api('/api/me'); state.me = result.user; state.push = result.push; state.realtime = result.realtime;
+    const result = await api('/api/me'); state.me = result.user; state.push = result.push; state.realtime = result.realtime; state.calls=result.calls;
+    state.media?.close();state.media=null;
+    if(result.calls){const {installMedia}=await import('/chat-media.js');state.media=installMedia({api,post,config:result.calls,room:id=>{const r=state.rooms.find(x=>x.id===id);return r?{...r,code:state.me?.role==='client'?'Wingfactor Support':r.code}:null;},preview:previewFile,modal,dismiss,toast,recording:()=>state.recorder?.state==='recording',beep});}
     state.rooms = await api('/api/rooms');
     state.roomId = state.me.role === 'client' ? state.me.roomId : new URLSearchParams(location.search).get('room');
     if (!selectedRoom()) state.roomId = null;
@@ -359,7 +364,7 @@ document.addEventListener('click', async event => {
     }
     switch (button.dataset.action) {
       case 'close-modal': dismiss(); break;
-      case 'back': if (state.recorder?.state === 'recording') throw new Error('Stop your recording first.'); state.roomId = null; renderChat(); break;
+      case 'back': state.media?.closeCamera(); if (state.recorder?.state === 'recording') throw new Error('Stop your recording first.'); state.roomId = null; renderChat(); break;
       case 'conversations': $('.layout').classList.remove('has-room'); break;
       case 'settings': showSettings(); break;
       case 'enable-push': await enablePush(); break;
@@ -374,9 +379,11 @@ document.addEventListener('click', async event => {
       case 'revoke-link': if (confirm('Revoke all client access to this conversation? History stays saved.')) { await post(`/api/rooms/${state.roomId}/revoke`); dismiss(); toast('Client access revoked.'); } break;
       case 'toggle-room': await api(`/api/rooms/${state.roomId}`, { method: 'PATCH', body: JSON.stringify({ status: selectedRoom().status === 'open' ? 'closed' : 'open' }) }); dismiss(); await refresh(); renderChat(); break;
       case 'delete-room': if (confirm('Permanently delete this conversation and all its messages and files? This cannot be undone.')) { await api(`/api/rooms/${state.roomId}`, { method: 'DELETE' }); dismiss(); state.roomId = null; await refresh(); renderChat(); } break;
+      case 'voice-call': await state.media?.call(state.roomId); break;
+      case 'camera': await state.media?.camera(); break;
       case 'attach': $('#file-input').click(); break;
       case 'remove-file': state.file = null; $('#file-preview').classList.add('hidden'); break;
-      case 'record': await record(); break;
+      case 'record': if(state.media?.active())throw new Error('Finish your voice call before recording a voice note.'); await record(); break;
       case 'earlier': if (state.messages.length) await loadMessages(state.roomId, state.messages[0].seq); break;
       case 'logout': if (!confirm('Sign out on this device? Its support notifications will stop.')) break;
         await post('/api/logout');

@@ -11,6 +11,8 @@ Private client support chat, designed for **Netlify Free + Supabase Free**. GitH
 - The first unanswered client message starts a cycle. Additional client messages do not restart it. At **5 minutes**, remind assigned teammates. At **10 minutes**, notify administrators. Any staff reply, including a file-only reply, ends the cycle and cancels pending escalation jobs. Reading a message does not count as replying.
 - Room assignment, reassignment, close/reopen, client-link replacement/revocation, permanent room deletion, staff disable/reset, and multi-device notification registration are included.
 - Voice notes are recorded for up to three minutes, then shared only when Send is pressed.
+- One-to-one voice calls ring inside the chat and through existing browser push notifications. The first assigned teammate device to answer owns the call. Participants can mute or hang up; call outcomes and duration are saved in chat history, while audio is never recorded or uploaded.
+- The camera button opens a live front/back camera preview where supported. A captured photo must be reviewed and added to the composer before Send; the device camera/file picker remains available as a fallback.
 
 Identity inside messages, filenames, recordings, or document contents remains visible by design. The server processes messages; this is not end-to-end encryption.
 
@@ -23,6 +25,8 @@ Identity inside messages, filenames, recordings, or document contents remains vi
 
 The production website is deployed at `https://wingfactor-support-chat.netlify.app`. Source is saved in this GitHub repository; the current release was published with the CLI. Link the repository in Netlify if automatic deployment on pushes is wanted. Set production visitor access to Public; application accounts and private client links protect chat data. The account's default Netlify team-login gate must not block clients or service-worker notifications. Preview deployments should use a separate backend/configuration, because writes accept only the configured production origin.
 
+The `Testing` branch is isolated at `https://wingfactor-support-chat-testing.netlify.app`. It uses `wct_` tables, the `wingchat-testing` Edge Function, `wingchat-testing-worker`, `wf_testing_session` cookie, and `wingchat-testing-media` bucket. It contains no production accounts or conversations. `scripts/testing-schema.js` renders the testing schema from the committed migrations; apply its output only once to a fresh testing namespace.
+
 ## Security model
 
 Every chat table has RLS enabled, explicit deny policies, and revoked privileges for `anon` and `authenticated`. All chat RPCs are executable only by `service_role`. The Edge Function owns the privileged key through Supabase's built-in server environment and checks the hashed custom session and room assignment on every operation. Private contact records are fetched only in administrator requests.
@@ -30,6 +34,8 @@ Every chat table has RLS enabled, explicit deny policies, and revoked privileges
 Staff passwords use salted **PBKDF2-HMAC-SHA256, 600,000 iterations** through Web Crypto. Session and client-link secrets have 256 bits of randomness and are stored as SHA-256 hashes. Setup uses a one-time hashed secret and expiry, with a transaction preventing reuse. Client links use URL fragments, which are exchanged for cookies and removed from the address bar. Share links privately: anyone holding a valid link has client access.
 
 Realtime uses random per-session notification topics. Broadcasts carry **only an empty wake-up event**, never messages, contacts, or attachments. A wake-up causes the browser to fetch authorized data from the API. Possessing a realtime topic does not grant API access. Session revocation removes the topic from future recipients. Browser publishable keys cannot read chat tables, storage objects, or chat RPCs directly.
+
+Voice-call audio uses browser WebRTC encryption and travels directly between the two browsers when the network permits it. SDP and ICE candidates pass only through the authenticated API and are never placed in public Realtime broadcasts. The default configuration uses Cloudflare's free public STUN service. Restricted networks may require an optional TURN service; add its time-limited credentials to `config.iceServers` and use `config.iceTransportPolicy = "relay"` when hiding peer network addresses is required.
 
 Private media is served through short signed URLs after authorization, with lifetime bounded by its seven-day expiry. Do not share signed URLs: they remain usable until their short expiry. Already downloaded client files cannot be recalled.
 
@@ -73,8 +79,8 @@ npm test
 npm audit --omit=dev --audit-level=high
 ```
 
-`test/interface.test.js` checks the UI, escaping, client link handling, admin controls, and preservation of media/drafts during updates. `scripts/verify-hosted.js` is a manual live acceptance test that takes temporary test credentials through hidden stdin; it covers the deployed API, sessions, privacy, access control, WebSocket events, message retries, direct media, and replies. Live test users/rooms must be removed after verification.
+`test/interface.test.js` checks the UI, escaping, client link handling, admin controls, and preservation of media/drafts during updates. `test/voice-call.test.js` covers offer/answer/ICE order, permission denial, first-answer behavior, mute and resource cleanup, plus camera cancellation, facing-mode changes, capture and JPEG sizing. `scripts/verify-hosted.js` is a manual live acceptance test that takes temporary test credentials through hidden stdin; it covers the deployed API, sessions, privacy, access control, WebSocket events, message retries, direct media, and replies. Live test users/rooms must be removed after verification.
 
 The original SQLite server and its integration tests remain as a self-hosted reference/regression fixture. **The Netlify deployment uses the Supabase backend, not `server/`.** The legacy server does not implement the hosted seven-day retention policy and should not be used for this production configuration. Docker/Compose files describe that earlier self-hosted option only.
 
-Actual locked-screen phone notification delivery and visual browser QA require verification on the deployed website/devices; DOM/API tests do not establish those results.
+Actual two-device audio, phone camera behavior, locked-screen notification delivery, and visual browser QA require verification on the deployed website/devices; DOM/API tests do not establish those results.

@@ -5,7 +5,7 @@
   NODE_VERSION = "24"
 [[redirects]]
   from = "/api/*"
-  to = "https://nmgjkexfgytjivxudsmo.supabase.co/functions/v1/wingchat/:splat"
+  to = "https://nmgjkexfgytjivxudsmo.supabase.co/functions/v1/wingchat-testing/:splat"
   status = 200
   force = true
 [[redirects]]
@@ -20,5 +20,5 @@
     X-Frame-Options = "DENY"
     X-Robots-Tag = "noindex, nofollow"
     Cache-Control = "no-store"
-    Permissions-Policy = "camera=(), microphone=(self), geolocation=()"
+    Permissions-Policy = "camera=(self), microphone=(self), geolocation=()"
     Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: https://nmgjkexfgytjivxudsmo.supabase.co; media-src 'self' blob: https://nmgjkexfgytjivxudsmo.supabase.co; connect-src 'self' https://nmgjkexfgytjivxudsmo.supabase.co wss://nmgjkexfgytjivxudsmo.supabase.co; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"

@@ -19,15 +19,15 @@ const str=(v,max=1000)=>typeof v==='string'?v.trim().slice(0,max):'';
 const validPass=v=>typeof v==='string'&&v.length>=14&&v.length<=200;
 const types={jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',gif:'image/gif',mp4:'video/mp4',webm:'video/webm',mov:'video/quicktime',mp3:'audio/mpeg',m4a:'audio/mp4',ogg:'audio/ogg',wav:'audio/wav',pdf:'application/pdf',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',txt:'text/plain',csv:'text/csv'};
 const check=(ok,status,message)=>{if(!ok){const e=new Error(message);e.status=status;throw e;}};
-export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=>{}),clock=Date.now}){
- const table=name=>db.from('wc_'+name);
+export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=>{}),clock=Date.now,prefix='wc_',bucket='wingchat-media',functionName='wingchat',cookieName='wf_session'}){
+ const table=name=>db.from(prefix+name);
  async function result(query){const {data,error}=await query;if(error){const m=/^(\d{3})\|(.+)$/.exec(error.message);if(m)check(false,+m[1],m[2]);throw error;}return data;}
  const all=(name,query)=>result(query||table(name).select('*'));
  const one=async(name,column,value)=>{const rows=await result(table(name).select('*').eq(column,value).limit(1));return rows?.[0]||null;};
  const put=(name,row)=>result(table(name).insert(row));
  const remove=(name,column,value)=>result(table(name).delete().eq(column,value));
  const patch=(name,column,value,data)=>result(table(name).update(data).eq(column,value));
- const rpc=(name,args={})=>result(db.rpc('wc_'+name,args));
+ const rpc=(name,args={})=>result(db.rpc(prefix+name,args));
  async function actor(tokenHash){
   const s=await one('sessions','token_hash',tokenHash);if(!s)return null;
   if(s.user_id){const u=await one('users','id',s.user_id);return u&&!u.disabled?{...u,sessionHash:tokenHash,liveKey:s.live_key}:null;}
@@ -43,17 +43,18 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
  async function notify(userId,roomId,kind,title,message,client=false,cycle=null){await rpc('notify',{p_user:client?null:userId,p_client:client?roomId:null,p_room:roomId,p_kind:kind,p_cycle:cycle,p_title:title,p_body:message});}
  async function cleanup(){
   const items=await result(table('deletions').select('id').limit(100));
-  if(items.length){const {error}=await db.storage.from('wingchat-media').remove(items.map(x=>x.id));if(!error)await result(table('deletions').delete().in('id',items.map(x=>x.id)));}
+  if(items.length){const {error}=await db.storage.from(bucket).remove(items.map(x=>x.id));if(!error)await result(table('deletions').delete().in('id',items.map(x=>x.id)));}
  }
  async function worker(config){
-  await rpc('schedule');await cleanup();
+  await rpc('schedule');await rpc('calls_sweep');await cleanup();
   const jobs=await rpc('claim_jobs');
   await Promise.all((jobs||[]).map(async job=>{
    // Re-read after leasing: a reply or revocation may have cancelled the job meanwhile.
    if(!await one('push_jobs','id',job.id))return;
+   if(job.kind==='call'){const call=await one('calls','id',job.cycle_id);if(!call||call.status!=='ringing'||call.expires_at<=clock()){await remove('push_jobs','id',job.id);return;}}
    const sub=await one('subscriptions','endpoint',job.endpoint);const a=sub&&await actor(sub.session_hash);
    if(!a||(job.room_id&&!await rpc('allowed',{p_token:a.sessionHash,p_room:job.room_id}))){await remove('push_jobs','id',job.id);return;}
-   try{await webpush.sendNotification(sub.subscription,JSON.stringify(job.payload),{vapidDetails:{subject:config.contact,publicKey:config.vapid.publicKey,privateKey:config.vapid.privateKey},urgency:'high',TTL:300,timeout:10000});await remove('push_jobs','id',job.id);}
+   try{await webpush.sendNotification(sub.subscription,JSON.stringify(job.payload),{vapidDetails:{subject:config.contact,publicKey:config.vapid.publicKey,privateKey:config.vapid.privateKey},urgency:'high',TTL:job.kind==='call'?Math.max(1,Math.ceil((job.expires_at-clock())/1000)):300,timeout:10000});await remove('push_jobs','id',job.id);}
    catch(e){if([404,410].includes(e.statusCode))await remove('subscriptions','endpoint',job.endpoint);else await patch('push_jobs','id',job.id,{attempts:job.attempts+1,leased_until:0,next_at:clock()+Math.min(300000,1000*2**Math.min(8,job.attempts+1))});}
   }));
  }
@@ -72,13 +73,13 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
   const reply=(data,status=200)=>new Response(JSON.stringify(data),{status,headers});
   try{
    const setting=await one('settings','key','config');check(setting,503,'Support is being configured.');const config=setting.value;
-   let path=new URL(req.url).pathname.replace(/^.*\/wingchat/,'');if(path.startsWith('/api'))path=path.slice(4);const method=req.method;
+   let path=new URL(req.url).pathname;const marker='/'+functionName;const offset=path.indexOf(marker);if(offset>=0)path=path.slice(offset+marker.length);if(path.startsWith('/api'))path=path.slice(4);const method=req.method;
    if(path==='/worker'){
     check(method==='POST'&&req.headers.get('x-worker-key')===config.workerKey,403,'Forbidden.');await worker(config);return reply({ok:true});
    }
    if(!['GET','HEAD'].includes(method))check(req.headers.get('origin')===config.origin,403,'Request origin not allowed.');
-   const cookieToken=/(?:^|;\s*)wf_session=([\w-]+)/.exec(req.headers.get('cookie')||'')?.[1];
-   const sessionCookie=token=>headers.append('Set-Cookie',`wf_session=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=31536000`);
+   const cookieToken=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(cookieName+'='))?.slice(cookieName.length+1);
+   const sessionCookie=token=>headers.append('Set-Cookie',`${cookieName}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=31536000`);
    async function session(userId,roomId){const token=secret();await put('sessions',{token_hash:hash(token),user_id:userId,room_id:roomId,live_key:'wc-'+secret(),created_at:clock()});sessionCookie(token);}
    if(path==='/healthz')return reply({ok:true});
    if(path==='/setup'&&method==='POST'){
@@ -95,8 +96,15 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
     const d=await json(req);check(typeof d.key==='string'&&d.key.length<=100,401,'Invalid support link.');await limit('client:'+hash(d.key),30,600000);const k=await one('keys','key_hash',hash(d.key));check(k,401,'This link is invalid or revoked.');await session(null,k.room_id);return reply({roomId:k.room_id});
    }
    const a=cookieToken&&await actor(hash(cookieToken));check(a,401,'Please sign in or open your private support link.');sessionCookie(cookieToken);
-   if(path==='/me')return reply({user:{id:a.id,role:a.role,name:a.name,roomId:a.roomId},push:{enabled:true,publicKey:config.vapid.publicKey,devices:(await result(table('subscriptions').select('endpoint').eq('session_hash',a.sessionHash))).length},realtime:{url:supabaseUrl,key:config.publishableKey,topic:a.liveKey}});
-   if(path==='/logout'&&method==='POST'){await remove('sessions','token_hash',a.sessionHash);headers.set('Set-Cookie','wf_session=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0');return reply({ok:true});}
+   if(path==='/me')return reply({user:{id:a.id,role:a.role,name:a.name,roomId:a.roomId},push:{enabled:true,publicKey:config.vapid.publicKey,devices:(await result(table('subscriptions').select('endpoint').eq('session_hash',a.sessionHash))).length},calls:{iceServers:config.iceServers||[{urls:'stun:stun.cloudflare.com:3478'}],iceTransportPolicy:config.iceTransportPolicy||'all'},realtime:{url:supabaseUrl,key:config.publishableKey,topic:a.liveKey}});
+   if(path==='/calls'&&method==='GET')return reply(await rpc('call_api',{p_token:a.sessionHash,p_action:'list'}));
+   if(path==='/calls'&&method==='POST'){
+    const d=await json(req);check(['start','accept','decline','end','connected','signal','poll'].includes(d.action)&&typeof d.callId==='string'&&/^[\w-]{10,100}$/.test(d.callId),400,'Invalid call request.');
+    await limit('call:'+a.sessionHash,400);if(d.action==='start')await limit('call-start:'+a.id,10);
+    const call=await rpc('call_api',{p_token:a.sessionHash,p_action:d.action,p_call:d.callId,p_room:d.roomId||null,p_payload:d.payload||{},p_after:Math.max(0,Number(d.after)||0)});
+    if(d.action==='start')waitUntil(worker(config));return reply(call);
+   }
+   if(path==='/logout'&&method==='POST'){await remove('sessions','token_hash',a.sessionHash);headers.set('Set-Cookie',`${cookieName}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`);return reply({ok:true});}
    if(path==='/password'&&method==='POST'){
     check(a.role!=='client',403,'Staff only.');await limit('password:'+a.id,8,600000);const d=await json(req);check(typeof d.current==='string'&&d.current.length<=200&&await matches(d.current,a.password),403,'Current password is incorrect.');check(validPass(d.password),400,'Use 14–200 characters.');await patch('users','id',a.id,{password:await passwordHash(d.password)});await remove('sessions','user_id',a.id);await session(a.id,null);return reply({ok:true});
    }
@@ -159,7 +167,7 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
      const bytes=await req.arrayBuffer();check(bytes.byteLength>0&&bytes.byteLength<=26214400,413,'Maximum attachment size is 25 MB.');await access(await actor(a.sessionHash),roomId);const attachmentId=id();
      const row={id:attachmentId,room_id:roomId,session_hash:a.sessionHash,filename,mime,size:bytes.byteLength,created_at:clock(),expires_at:clock()+7*86400000};
      await rpc('reserve_upload',{p_row:row});
-     const {error}=await db.storage.from('wingchat-media').upload(attachmentId,bytes,{contentType:mime,cacheControl:'0',upsert:false});if(error){await remove('attachments','id',attachmentId);throw error;}
+     const {error}=await db.storage.from(bucket).upload(attachmentId,bytes,{contentType:mime,cacheControl:'0',upsert:false});if(error){await remove('attachments','id',attachmentId);throw error;}
      return reply({attachmentId},201);
     }
    }
@@ -167,10 +175,10 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
    if(media&&method==='GET'){
     const f=await one('attachments','id',media[1]);check(f,404,'Attachment not found.');await access(a,f.room_id);check(!f.expired&&f.expires_at>clock(),410,'Attachment expired after 7 days.');
     const inline=/^(image\/|video\/|audio\/)/.test(f.mime)&&new URL(req.url).searchParams.get('download')!=='1';
-    const {data,error}=await db.storage.from('wingchat-media').createSignedUrl(f.id,Math.max(1,Math.min(60,Math.floor((f.expires_at-clock())/1000))),inline?{}:{download:f.filename});if(error)throw error;
+    const {data,error}=await db.storage.from(bucket).createSignedUrl(f.id,Math.max(1,Math.min(60,Math.floor((f.expires_at-clock())/1000))),inline?{}:{download:f.filename});if(error)throw error;
     headers.set('Location',data.signedUrl);return new Response(null,{status:302,headers});
    }
-   if(path==='/alerts'&&method==='GET'){check(a.role!=='client',403,'Staff only.');const alerts=await result(table('alerts').select('*,wc_rooms(code)').eq('user_id',a.id).eq('seen',false).order('created_at',{ascending:false}).limit(100));const visible=[];for(const x of alerts)if(await rpc('allowed',{p_token:a.sessionHash,p_room:x.room_id}))visible.push({...x,code:x.wc_rooms.code,wc_rooms:undefined});return reply(visible);}
+   if(path==='/alerts'&&method==='GET'){check(a.role!=='client',403,'Staff only.');const alerts=await result(table('alerts').select('*,room:'+prefix+'rooms(code)').eq('user_id',a.id).eq('seen',false).order('created_at',{ascending:false}).limit(100));const visible=[];for(const x of alerts)if(await rpc('allowed',{p_token:a.sessionHash,p_room:x.room_id}))visible.push({...x,code:x.room.code,room:undefined});return reply(visible);}
    if(path==='/alerts/read'&&method==='POST'){check(a.role!=='client',403,'Staff only.');await patch('alerts','user_id',a.id,{seen:true});return reply({ok:true});}
    if(path==='/push'&&method==='POST'){
     const d=await json(req),s=d.subscription;let u;try{u=new URL(s?.endpoint);}catch{}check(u&&u.protocol==='https:'&&!u.port&&!u.username&&!u.password&&(u.hostname==='fcm.googleapis.com'||u.hostname==='updates.push.services.mozilla.com'||u.hostname.endsWith('.push.apple.com'))&&s.endpoint.length<=2048&&/^[\w-]{20,30}$/.test(s.keys?.auth)&&/^[\w-]{80,100}$/.test(s.keys?.p256dh),400,'Invalid browser push subscription.');
