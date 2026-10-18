@@ -5,7 +5,7 @@
   NODE_VERSION = "24"
 [[redirects]]
   from = "/api/*"
-  to = "https://nmgjkexfgytjivxudsmo.supabase.co/functions/v1/wingchat-testing/:splat"
+  to = "https://nmgjkexfgytjivxudsmo.supabase.co/functions/v1/wingchat/:splat"
   status = 200
   force = true
 [[redirects]]

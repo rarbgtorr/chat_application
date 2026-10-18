@@ -25,7 +25,7 @@ Identity inside messages, filenames, recordings, or document contents remains vi
 
 The production website is deployed at `https://wingfactor-support-chat.netlify.app`. Source is saved in this GitHub repository; the current release was published with the CLI. Link the repository in Netlify if automatic deployment on pushes is wanted. Set production visitor access to Public; application accounts and private client links protect chat data. The account's default Netlify team-login gate must not block clients or service-worker notifications. Preview deployments should use a separate backend/configuration, because writes accept only the configured production origin.
 
-The `Testing` branch is isolated at `https://wingfactor-support-chat-testing.netlify.app`. It uses `wct_` tables, the `wingchat-testing` Edge Function, `wingchat-testing-worker`, `wf_testing_session` cookie, and `wingchat-testing-media` bucket. It contains no production accounts or conversations. `scripts/testing-schema.js` renders the testing schema from the committed migrations; apply its output only once to a fresh testing namespace.
+The `Testing` branch is isolated at `https://testing--wingfactor-support-chat.netlify.app`. Netlify serves it as a branch deploy from the existing `wingfactor-support-chat` project, while `main` remains the production deploy. It uses `wct_` tables, the `wingchat-testing` Edge Function, `wingchat-testing-worker`, `wf_testing_session` cookie, and `wingchat-testing-media` bucket. It contains no production accounts or conversations. `scripts/testing-schema.js` renders the testing schema from the committed migrations; apply its output only once to a fresh testing namespace.
 
 ## Security model
 
