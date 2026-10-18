@@ -1,11 +1,14 @@
 import {VoiceCall} from './voice-call.js';
+const cameraIcon='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h4l2-3h6l2 3h4v15H3Z"/><circle cx="12" cy="13" r="4"/></svg>';
+const switchIcon='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7-4 4 4 4M3 11h13a4 4 0 0 1 4 4v2M17 3l4 4-4 4M21 7H8a4 4 0 0 0-4 4"/></svg>';
+
 export class Camera {
   constructor({devices,video,onError=()=>{}}){Object.assign(this,{devices,video,onError});this.facing='environment';this.generation=0;}
   stop(){++this.generation;this.stream?.getTracks().forEach(t=>t.stop());this.stream=null;if(this.video)this.video.srcObject=null;}
   async open(){
     this.stop();const generation=this.generation;
-    if(!this.devices?.getUserMedia)throw new Error('Live camera is unavailable. Use “Device camera or photo” below.');
-    const stream=await this.devices.getUserMedia({audio:false,video:{facingMode:{ideal:this.facing},width:{ideal:1600}}});
+    if(!this.devices?.getUserMedia)throw new Error('Live camera is unavailable in this browser.');
+    const stream=await this.devices.getUserMedia({audio:false,video:{facingMode:{ideal:this.facing},width:{ideal:1920},height:{ideal:1080}}});
     if(generation!==this.generation){stream.getTracks().forEach(t=>t.stop());return;}
     this.stream=stream;this.video.srcObject=stream;await this.video.play();
   }
@@ -19,49 +22,60 @@ export class Camera {
     this.stop();return new File([blob],`photo-${Date.now()}.jpg`,{type:'image/jpeg'});
   }
 }
+
 export function installMedia({api,post,config,room,preview,modal,dismiss,toast,recording,beep}){
   const host=document.createElement('section');host.id='call-panel';host.className='call-panel hidden';host.setAttribute('aria-live','polite');document.body.append(host);
   const audio=document.createElement('audio');audio.autoplay=true;document.body.append(audio);
-  let camera=null,photo=null,photoUrl=null,closed=false,syncing=false,known=null;
-  const label=c=>c.incoming?'Wingfactor Support':room(c.roomId)?.code||'Support conversation';
+  let camera=null,photo=null,photoUrl=null,closed=false,syncing=false,known=null,remoteStream=null,localStream=null;
+  const attach=(selector,stream,muted=false)=>{const el=host.querySelector(selector);if(!el)return;el.muted=muted;if(el.srcObject!==stream)el.srcObject=stream;if(stream)void el.play().catch(()=>{});};
   const render=c=>{
-    host.classList.toggle('hidden',!c);if(!c){host.replaceChildren();return;}
-    const incoming=c.incoming&&c.status==='ringing';
-    host.innerHTML='<div><strong></strong><p></p></div><div class="call-actions"></div>';
-    host.querySelector('strong').textContent=incoming?'Incoming voice call':c.status==='active'?'Voice call connected':c.status==='connecting'?'Connecting voice call…':'Calling…';
-    const name=room(c.roomId)?.code||label(c);host.querySelector('p').textContent=(name==='Wingfactor Support'?name:room(c.roomId)?.code||'Support conversation')+(c.connectedAt?' · '+Math.max(0,Math.floor((Date.now()-c.connectedAt)/1000))+'s':'');
+    host.classList.toggle('hidden',!c);host.classList.toggle('video-call',c?.media==='video');if(!c){host.replaceChildren();return;}
+    const incoming=c.incoming&&c.status==='ringing',video=c.media==='video',kind=video?'video':'voice';
+    host.innerHTML=`${video?'<div class="call-videos"><video id="call-remote-video" autoplay playsinline></video><video id="call-local-video" autoplay playsinline muted></video></div>':''}<div class="call-summary"><strong></strong><p></p></div><div class="call-actions"></div>`;
+    host.querySelector('strong').textContent=incoming?`Incoming ${kind} call`:c.status==='active'?`${video?'Video':'Voice'} call connected`:c.status==='connecting'?`Connecting ${kind} call…`:`Calling with ${kind}…`;
+    const name=room(c.roomId)?.code||'Support conversation';host.querySelector('p').textContent=name+(c.connectedAt?' · '+Math.max(0,Math.floor((Date.now()-c.connectedAt)/1000))+'s':'');
     const add=(text,action,style)=>{const b=document.createElement('button');b.textContent=text;b.className=style||'secondary';b.dataset.callAction=action;host.querySelector('.call-actions').append(b);};
-    if(incoming){add('Answer','answer','primary');add('Decline','end','danger');}
-    else{if(c.status==='active'||c.status==='connecting')add(c.muted?'Unmute':'Mute','mute');add(c.status==='ringing'?'Cancel':'Hang up','end','danger');}
-    if(audio.paused&&audio.srcObject)add('Play call audio','play');
+    if(incoming){add(video?'Answer with video':'Answer','answer','primary');add('Decline','end','danger');}
+    else{
+      if(c.status==='active'||c.status==='connecting'){add(c.muted?'Unmute':'Mute','mute');if(video)add(c.cameraOff?'Turn camera on':'Turn camera off','camera');}
+      add(c.status==='ringing'?'Cancel':'Hang up','end','danger');
+    }
+    if(video){attach('#call-remote-video',remoteStream);attach('#call-local-video',localStream,true);if(remoteStream&&host.querySelector('#call-remote-video')?.paused)add('Play call','play');}
+    else{audio.srcObject=remoteStream;if(audio.paused&&audio.srcObject)add('Play call audio','play');}
   };
-  const voice=new VoiceCall({request:d=>post('/api/calls',d),mediaDevices:navigator.mediaDevices,PeerConnection:window.RTCPeerConnection,config,onChange:render,onRemote:stream=>{audio.srcObject=stream;if(stream)void audio.play().catch(()=>render(voice.call));},onError:e=>toast(e.message)});
-  const click=async e=>{const a=e.target.closest('[data-call-action]')?.dataset.callAction;if(!a)return;try{if(a==='answer'){if(recording())throw new Error('Stop recording your voice note first.');await voice.accept();}if(a==='end')await voice.end();if(a==='mute')voice.mute();if(a==='play')await audio.play();}catch(error){toast(error.message);}};
+  const voice=new VoiceCall({request:d=>post('/api/calls',d),mediaDevices:navigator.mediaDevices,PeerConnection:window.RTCPeerConnection,config,onChange:render,
+    onRemote:stream=>{remoteStream=stream;if(voice.call?.media==='video')attach('#call-remote-video',stream);else{audio.srcObject=stream;if(stream)void audio.play().catch(()=>render(voice.call));}},
+    onLocal:stream=>{localStream=stream;attach('#call-local-video',stream,true);},onError:e=>toast(e.message)});
+  const click=async e=>{const a=e.target.closest('[data-call-action]')?.dataset.callAction;if(!a)return;try{
+    if(a==='answer'){if(recording())throw new Error('Stop recording your voice note first.');await voice.accept();}
+    if(a==='end')await voice.end();if(a==='mute')voice.mute();if(a==='camera')voice.toggleCamera();
+    if(a==='play'){if(voice.call?.media==='video')await host.querySelector('#call-remote-video')?.play();else await audio.play();}
+  }catch(error){toast(error.message);}};
   host.addEventListener('click',click);
-  const closeCamera=()=>{camera?.stop();camera=null;photo=null;if(photoUrl)URL.revokeObjectURL(photoUrl);photoUrl=null;};
+  const closeCamera=()=>{camera?.stop();camera=null;photo=null;if(photoUrl)URL.revokeObjectURL(photoUrl);photoUrl=null;document.querySelector('#modal')?.classList.remove('camera-dialog');};
   async function openCamera(){
-    if(voice.busy)throw new Error('Wait for the call to finish connecting.');
-    modal('Take a photo','<div class="camera-view"><video id="camera-video" autoplay playsinline muted></video><img id="camera-photo" class="hidden" alt="Photo preview"></div><p id="camera-error" role="status"></p><div class="modal-actions"><button class="secondary" type="button" data-camera="device">Device camera or photo</button><button class="secondary" type="button" data-camera="flip">Switch camera</button><button class="primary" type="button" data-camera="capture">Take photo</button><button class="secondary hidden" type="button" data-camera="retake">Retake</button><button class="primary hidden" type="button" data-camera="use">Use photo</button></div><input id="camera-input" class="hidden" type="file" accept="image/*" capture="environment">');
+    if(voice.call||voice.busy)throw new Error('Finish your call before taking a photo.');
+    modal('Take a photo',`<div class="camera-view"><video id="camera-video" autoplay playsinline muted></video><img id="camera-photo" class="hidden" alt="Photo preview"></div><p id="camera-error" role="status"></p><div class="camera-controls"><span class="camera-side"><button class="secondary hidden" type="button" data-camera="retake">Retake</button></span><span class="camera-capture"><button class="camera-shutter" type="button" data-camera="capture" aria-label="Take photo" title="Take photo">${cameraIcon}</button><span>Take photo</span></span><span class="camera-side camera-side-right"><button class="camera-switch" type="button" data-camera="flip" aria-label="Switch camera" title="Switch camera">${switchIcon}</button><button class="primary hidden" type="button" data-camera="use">Use photo</button></span></div>`);
+    document.querySelector('#modal').classList.add('camera-dialog');
     camera=new Camera({devices:navigator.mediaDevices,video:document.querySelector('#camera-video')});
-    try{await camera.open();}catch(e){closeCamera();if(!document.querySelector('#camera-error'))return;document.querySelector('#camera-error').textContent=e.name==='NotAllowedError'?'Camera permission was denied. Allow camera access in your browser settings, or choose a photo below.':e.message;}
+    try{await camera.open();}catch(e){closeCamera();document.querySelector('#modal')?.classList.add('camera-dialog');const error=document.querySelector('#camera-error');if(error)error.textContent=e.name==='NotAllowedError'?'Camera permission was denied. Allow camera access in your browser settings.':e.message;}
   }
   const cameraClick=async e=>{
     const action=e.target.closest('[data-camera]')?.dataset.camera;if(!action)return;
     try{
-      if(action==='device')document.querySelector('#camera-input').click();
       if(action==='flip')await camera?.flip();
       if(action==='retake'){closeCamera();await openCamera();}
       if(action==='capture'){
-        if(!camera)throw new Error('Camera unavailable. Choose “Device camera or photo”.');
+        if(!camera)throw new Error('Camera is unavailable. Allow camera access and try again.');
         photo=await camera.capture(document);photoUrl=URL.createObjectURL(photo);document.querySelector('#camera-photo').src=photoUrl;
         document.querySelector('#camera-photo').classList.remove('hidden');document.querySelector('#camera-video').classList.add('hidden');
-        for(const b of document.querySelectorAll('[data-camera]')){if(['capture','flip','device'].includes(b.dataset.camera))b.classList.add('hidden');if(['retake','use'].includes(b.dataset.camera))b.classList.remove('hidden');}
+        document.querySelector('.camera-capture').classList.add('hidden');document.querySelector('[data-camera="flip"]').classList.add('hidden');
+        document.querySelector('[data-camera="retake"]').classList.remove('hidden');document.querySelector('[data-camera="use"]').classList.remove('hidden');
       }
       if(action==='use'&&photo){const file=photo;dismiss();closeCamera();preview(file);}
     }catch(error){toast(error.message);}
   };
-  const cameraInput=e=>{if(e.target.id==='camera-input'&&e.target.files[0]){const file=e.target.files[0];dismiss();closeCamera();preview(file);}};
-  document.addEventListener('click',cameraClick);document.addEventListener('change',cameraInput);
+  document.addEventListener('click',cameraClick);
   document.querySelector('#modal').addEventListener('close',closeCamera);
   document.querySelector('#modal').addEventListener('cancel',closeCamera);
   async function sync(){
@@ -77,5 +91,5 @@ export function installMedia({api,post,config,room,preview,modal,dismiss,toast,r
   const timer=setInterval(()=>{if(voice.call||!document.hidden)void sync();},2000);
   const leave=()=>{if(voice.call)void post('/api/calls',{action:voice.ready?'end':'decline',callId:voice.call.id}).catch(()=>{});voice.clean();closeCamera();};
   window.addEventListener('pagehide',leave);
-  return {sync,closeCamera,camera:openCamera,call:async id=>{if(recording())throw new Error('Stop recording your voice note first.');await voice.start(id);},active:()=>Boolean(voice.call||voice.busy),close(){closed=true;clearInterval(timer);leave();host.remove();audio.remove();document.removeEventListener('click',cameraClick);document.removeEventListener('change',cameraInput);document.querySelector('#modal').removeEventListener('close',closeCamera);document.querySelector('#modal').removeEventListener('cancel',closeCamera);window.removeEventListener('pagehide',leave);}};
+  return {sync,closeCamera,camera:openCamera,call:async(id,media='voice')=>{if(recording())throw new Error('Stop recording your voice note first.');await voice.start(id,media);},active:()=>Boolean(voice.call||voice.busy),close(){closed=true;clearInterval(timer);leave();host.remove();audio.remove();document.removeEventListener('click',cameraClick);document.querySelector('#modal').removeEventListener('close',closeCamera);document.querySelector('#modal').removeEventListener('cancel',closeCamera);window.removeEventListener('pagehide',leave);}};
 }

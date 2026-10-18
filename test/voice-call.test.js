@@ -3,16 +3,20 @@ import assert from 'node:assert/strict';
 import {VoiceCall} from '../public/voice-call.js';
 import {Camera} from '../public/chat-media.js';
 function fixture(options={}){
- const requests=[],tracks=[{enabled:true,stopped:false,stop(){this.stopped=true;}}],stream={getTracks:()=>tracks,getAudioTracks:()=>tracks};
- class Peer{constructor(){this.connectionState='new';this.ice=[];}addTrack(){}async createOffer(){return {type:'offer',sdp:'offer-sdp'};}async createAnswer(){return {type:'answer',sdp:'answer-sdp'};}async setLocalDescription(d){this.localDescription=d;this.onicecandidate?.({candidate:{toJSON:()=>({candidate:'local-ice'})}});}async setRemoteDescription(d){this.remoteDescription=d;}async addIceCandidate(i){assert.ok(this.remoteDescription);this.ice.push(i);}close(){this.closed=true;}}
+ const requests=[],constraints=[],added=[];
+ const audioTrack={kind:'audio',enabled:true,stopped:false,stop(){this.stopped=true;}},videoTrack={kind:'video',enabled:true,stopped:false,stop(){this.stopped=true;}};
+ const tracks=options.videoStream?[audioTrack,videoTrack]:[audioTrack];
+ const stream={getTracks:()=>tracks,getAudioTracks:()=>[audioTrack],getVideoTracks:()=>options.videoStream?[videoTrack]:[]};
+ class Peer{constructor(){this.connectionState='new';this.ice=[];}addTrack(track){added.push(track);}async createOffer(){return {type:'offer',sdp:'offer-sdp'};}async createAnswer(){return {type:'answer',sdp:'answer-sdp'};}async setLocalDescription(d){this.localDescription=d;this.onicecandidate?.({candidate:{toJSON:()=>({candidate:'local-ice'})}});}async setRemoteDescription(d){this.remoteDescription=d;}async addIceCandidate(i){assert.ok(this.remoteDescription);this.ice.push(i);}close(){this.closed=true;}}
  let latest;
- const voice=new VoiceCall({request:async r=>{requests.push(r);if(options.request)return options.request(r);latest={id:r.callId,roomId:r.roomId,status:r.action==='accept'?'connecting':r.action==='end'?'ended':'ringing',signals:r.action==='accept'?[{seq:1,kind:'offer',data:{type:'offer',sdp:'remote-offer'}}]:[]};return latest;},mediaDevices:{getUserMedia:options.permission|| (async constraints=>{assert.equal(constraints.video,false);return stream;})},PeerConnection:Peer,config:{iceServers:[]}});
- return {voice,requests,tracks,stream};
+ const voice=new VoiceCall({request:async r=>{requests.push(r);if(options.request)return options.request(r);latest={id:r.callId,roomId:r.roomId,media:voice.call?.media||r.payload.media||r.media||'voice',status:r.action==='accept'?'connecting':r.action==='end'?'ended':'ringing',signals:r.action==='accept'?[{seq:1,kind:'offer',data:{type:'offer',sdp:'remote-offer'}}]:[]};return latest;},mediaDevices:{getUserMedia:options.permission|| (async value=>{constraints.push(value);return stream;})},PeerConnection:Peer,config:{iceServers:[]}});
+ return {voice,requests,tracks,audioTrack,videoTrack,stream,constraints,added};
 }
 test('caller sends offer, trickles ICE and stops microphone on hangup',async()=>{
  const f=fixture();await f.voice.start('room');await f.voice.sending;
  assert.equal(f.requests[0].action,'start');assert.equal(f.requests[0].payload.type,'offer');assert.equal(f.requests[1].payload.kind,'ice');
- const pc=f.voice.pc;f.voice.mute();assert.equal(f.tracks[0].enabled,false);f.voice.mute();assert.equal(f.tracks[0].enabled,true);
+ assert.equal(f.requests[0].payload.media,'voice');assert.equal(f.constraints[0].video,false);
+ const pc=f.voice.pc;f.voice.mute();assert.equal(f.audioTrack.enabled,false);f.voice.mute();assert.equal(f.audioTrack.enabled,true);
  await f.voice.end();assert.ok(pc.closed);assert.ok(f.tracks[0].stopped);assert.equal(f.voice.call,null);
 });
 test('answerer receives offer only after accepting and sends audio answer',async()=>{
@@ -20,6 +24,16 @@ test('answerer receives offer only after accepting and sends audio answer',async
  await f.voice.accept();await f.voice.sending;
  assert.equal(f.requests[0].action,'accept');assert.equal(f.voice.pc.remoteDescription.type,'offer');
  assert.equal(f.requests.find(r=>r.payload.kind==='answer').payload.data.type,'answer');await f.voice.end();
+});
+test('video call requests camera, signals its media type, and can pause local video',async()=>{
+ const f=fixture({videoStream:true});await f.voice.start('room','video');await f.voice.sending;
+ assert.equal(f.requests[0].payload.media,'video');assert.equal(f.constraints[0].video.facingMode,'user');assert.deepEqual(f.added,[f.audioTrack,f.videoTrack]);
+ f.voice.toggleCamera();assert.equal(f.videoTrack.enabled,false);f.voice.toggleCamera();assert.equal(f.videoTrack.enabled,true);
+ await f.voice.end();assert.ok(f.audioTrack.stopped);assert.ok(f.videoTrack.stopped);
+});
+test('incoming video call asks for camera only after the teammate answers',async()=>{
+ const f=fixture({videoStream:true});f.voice.incoming({id:'incoming-video',roomId:'room',incoming:true,status:'ringing',media:'video'});
+ assert.equal(f.constraints.length,0);await f.voice.accept();assert.equal(f.constraints[0].video.facingMode,'user');await f.voice.end();
 });
 test('remote ICE waits for remote description and is applied in sequence',async()=>{
  const f=fixture();await f.voice.start('room');const call=f.voice.call;

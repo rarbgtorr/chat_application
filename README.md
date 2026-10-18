@@ -4,15 +4,15 @@ Private client support chat, designed for **Netlify Free + Supabase Free**. GitH
 
 ## Behaviour
 
-- Clients open a private link. Teammates sign in and see assigned client IDs. Only administrators can see stored client names, contacts, and private notes.
+- Clients open a private link. Teammates sign in and see the administrator-entered name and support notes for assigned clients. Phone/email contact details remain administrator-only.
 - Text, images, videos, audio, voice notes, PDFs, Word, TXT, and CSV files reach recipients directly. Maximum attachment size: **25 MB**.
 - Attachments expire **7 days after upload**. Access stops at expiry; the scheduled worker deletes the object, normally on the next minute pass. Deletion failures stay queued for retry. Chat history shows **Attachment expired**. Text messages remain until the administrator deletes the conversation.
 - Staff sessions have no server inactivity timeout; a persistent HttpOnly, Secure, SameSite cookie renews on requests. Explicit logout, password changes, access revocation, and clearing browser storage can end access. Push is independent of an open chat connection.
 - The first unanswered client message starts a cycle. Additional client messages do not restart it. At **5 minutes**, remind assigned teammates. At **10 minutes**, notify administrators. Any staff reply, including a file-only reply, ends the cycle and cancels pending escalation jobs. Reading a message does not count as replying.
 - Room assignment, reassignment, close/reopen, client-link replacement/revocation, permanent room deletion, staff disable/reset, and multi-device notification registration are included.
 - Voice notes are recorded for up to three minutes, then shared only when Send is pressed.
-- One-to-one voice calls ring inside the chat and through existing browser push notifications. The first assigned teammate device to answer owns the call. Participants can mute or hang up; call outcomes and duration are saved in chat history, while audio is never recorded or uploaded.
-- The camera button opens a live front/back camera preview where supported. A captured photo must be reviewed and added to the composer before Send; the device camera/file picker remains available as a fallback.
+- One-to-one voice and video calls ring inside the chat and through existing browser push notifications. The first assigned teammate device to answer owns the call. Participants can mute, turn their video off, or hang up; call outcomes and duration are saved in chat history, while call media is never recorded or uploaded.
+- The camera button opens a full-screen live front/back camera preview. Capture is centered, camera switching is icon-only, and a captured photo must be reviewed and added to the composer before Send.
 
 Identity inside messages, filenames, recordings, or document contents remains visible by design. The server processes messages; this is not end-to-end encryption.
 
@@ -29,13 +29,13 @@ The `Testing` branch is isolated at `https://testing--wingfactor-support-chat.ne
 
 ## Security model
 
-Every chat table has RLS enabled, explicit deny policies, and revoked privileges for `anon` and `authenticated`. All chat RPCs are executable only by `service_role`. The Edge Function owns the privileged key through Supabase's built-in server environment and checks the hashed custom session and room assignment on every operation. Private contact records are fetched only in administrator requests.
+Every chat table has RLS enabled, explicit deny policies, and revoked privileges for `anon` and `authenticated`. All chat RPCs are executable only by `service_role`. The Edge Function owns the privileged key through Supabase's built-in server environment and checks the hashed custom session and room assignment on every operation. Assigned teammates receive only client names and support notes; phone/email contact details are returned only to administrators.
 
 Staff passwords use salted **PBKDF2-HMAC-SHA256, 600,000 iterations** through Web Crypto. Session and client-link secrets have 256 bits of randomness and are stored as SHA-256 hashes. Setup uses a one-time hashed secret and expiry, with a transaction preventing reuse. Client links use URL fragments, which are exchanged for cookies and removed from the address bar. Share links privately: anyone holding a valid link has client access.
 
 Realtime uses random per-session notification topics. Broadcasts carry **only an empty wake-up event**, never messages, contacts, or attachments. A wake-up causes the browser to fetch authorized data from the API. Possessing a realtime topic does not grant API access. Session revocation removes the topic from future recipients. Browser publishable keys cannot read chat tables, storage objects, or chat RPCs directly.
 
-Voice-call audio uses browser WebRTC encryption and travels directly between the two browsers when the network permits it. SDP and ICE candidates pass only through the authenticated API and are never placed in public Realtime broadcasts. The default configuration uses Cloudflare's free public STUN service. Restricted networks may require an optional TURN service; add its time-limited credentials to `config.iceServers` and use `config.iceTransportPolicy = "relay"` when hiding peer network addresses is required.
+Voice/video call media uses browser WebRTC encryption and travels directly between the two browsers when the network permits it. SDP and ICE candidates pass only through the authenticated API and are never placed in public Realtime broadcasts. The default configuration uses Cloudflare's free public STUN service. Restricted networks may require an optional TURN service; add its time-limited credentials to `config.iceServers` and use `config.iceTransportPolicy = "relay"` when hiding peer network addresses is required.
 
 Private media is served through short signed URLs after authorization, with lifetime bounded by its seven-day expiry. Do not share signed URLs: they remain usable until their short expiry. Already downloaded client files cannot be recalled.
 
@@ -57,7 +57,7 @@ Free projects may pause or reach usage limits; free plans do not provide guarant
 
 ## Deploy and configure
 
-1. Apply the SQL in `supabase/migrations/` to a chosen Supabase project. Do not apply the migrations twice. The current project's migrations are already applied.
+1. Apply the SQL in `supabase/migrations/` to a chosen Supabase project. Do not apply the migrations twice. The isolated `wct_` Testing equivalent is current; apply new `wc_` migrations to production only when releasing `Testing` to `main`.
 2. Configure the access-restricted `wc_settings` entries: `config` contains origin, public/publishable key, VAPID keys, contact URI, and worker secret. `setup` contains the hash of a random one-time setup key and its millisecond expiry. Never commit these values or expose server keys in client bundles.
 3. Deploy `supabase/functions/wingchat/index.ts` with its `core.js` dependency, with `verify_jwt = false` because it enforces its own cookies/worker authentication. `SUPABASE_SECRET_KEYS.default` or the built-in `SUPABASE_SERVICE_ROLE_KEY` is server-only.
 4. Schedule the minute worker using a server-side secret; existing project job is already configured.
@@ -79,8 +79,8 @@ npm test
 npm audit --omit=dev --audit-level=high
 ```
 
-`test/interface.test.js` checks the UI, escaping, client link handling, admin controls, and preservation of media/drafts during updates. `test/voice-call.test.js` covers offer/answer/ICE order, permission denial, first-answer behavior, mute and resource cleanup, plus camera cancellation, facing-mode changes, capture and JPEG sizing. `scripts/verify-hosted.js` is a manual live acceptance test that takes temporary test credentials through hidden stdin; it covers the deployed API, sessions, privacy, access control, WebSocket events, message retries, direct media, and replies. Live test users/rooms must be removed after verification.
+`test/interface.test.js` checks the UI, escaping, client link handling, teammate names/notes, client wording, admin controls, and preservation of media/drafts during updates. `test/voice-call.test.js` covers voice/video offer/answer/ICE order, permission denial, first-answer behavior, microphone/camera controls and resource cleanup, plus camera cancellation, facing-mode changes, capture and JPEG sizing. `scripts/verify-hosted.js` is a manual live acceptance test that takes temporary test credentials through hidden stdin; it covers the deployed API, sessions, privacy, access control, WebSocket events, message retries, direct media, and replies. Live test users/rooms must be removed after verification.
 
 The original SQLite server and its integration tests remain as a self-hosted reference/regression fixture. **The Netlify deployment uses the Supabase backend, not `server/`.** The legacy server does not implement the hosted seven-day retention policy and should not be used for this production configuration. Docker/Compose files describe that earlier self-hosted option only.
 
-Actual two-device audio, phone camera behavior, locked-screen notification delivery, and visual browser QA require verification on the deployed website/devices; DOM/API tests do not establish those results
+Actual two-device audio/video, phone camera behavior, locked-screen notification delivery, and visual browser QA require verification on the deployed website/devices; DOM/API tests do not establish those results.

@@ -59,11 +59,16 @@ async function fixture(t) {
 
 test('server protects client identity, admin-only routes, and unassigned conversations', async t => {
   const f = await fixture(t); const room = await f.room();
+  const agentRooms = await f.request('agent', '/api/rooms'); assert.equal(agentRooms.status, 200);
+  assert.deepEqual(agentRooms.data[0].client, { name: 'SECRET CLIENT NAME', notes: 'PRIVATE ADMIN NOTES' });
+  assert.equal(JSON.stringify(agentRooms.data).includes('9876543210'), false);
+  assert.equal(JSON.stringify(agentRooms.data).includes('private'), false);
+  const clientRooms = await f.request('client', '/api/rooms'); assert.equal(clientRooms.status, 200);
+  const clientPayload = JSON.stringify(clientRooms.data);
+  for (const secret of ['SECRET CLIENT NAME', '9876543210', 'PRIVATE ADMIN NOTES', 'private', 'client']) assert.equal(clientPayload.includes(secret), false);
   for (const role of ['agent', 'client']) {
-    const rooms = await f.request(role, '/api/rooms'); assert.equal(rooms.status, 200);
+    const rooms = role === 'agent' ? agentRooms : clientRooms;
     assert.equal(rooms.data[0].code, room.code);
-    const payload = JSON.stringify(rooms.data);
-    for (const secret of ['SECRET CLIENT NAME', '9876543210', 'PRIVATE ADMIN NOTES', 'private']) assert.equal(payload.includes(secret), false);
     assert.equal((await f.request(role, '/api/users')).status, 403);
     assert.equal((await f.request(role, `/api/rooms/${room.roomId}`, { method: 'DELETE' })).status, 403);
     assert.equal((await f.request(role, `/api/rooms/${room.roomId}/link`, { method: 'POST' })).status, 403);

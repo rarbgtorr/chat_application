@@ -5,6 +5,7 @@ import { JSDOM } from 'jsdom';
 
 const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 const script = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+const mediaScript = await readFile(new URL('../public/chat-media.js', import.meta.url), 'utf8');
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
@@ -18,6 +19,7 @@ async function ui(t, { role = 'agent', link = false } = {}) {
   window.confirm = () => true;
   const room = { id: roomId, code: 'Client #ABC123', status: 'open', created_at: Date.now(), unread: 0,
     agents: [{ id: 'agent123', name: 'Support teammate' }], waitingSince: null,
+    ...(role === 'agent' ? { client: { name: 'Visible Client', notes: 'Keep the client updated every hour.' } } : {}),
     ...(role === 'admin' ? { private: { name: 'ADMIN-ONLY CLIENT', contact: 'SECRET-PHONE', notes: 'PRIVATE' } } : {}) };
   window.fetch = async (path, options = {}) => {
     const data = options.body && !(options.body instanceof window.Blob) ? JSON.parse(options.body) : null;
@@ -40,9 +42,13 @@ async function ui(t, { role = 'agent', link = false } = {}) {
   return { window, document: window.document, calls, messages, room };
 }
 
-test('teammate screen exposes client ID and omits private fields/admin controls', async t => {
+test('teammate screen uses the admin client name and exposes notes without contact details', async t => {
   const f = await ui(t);
-  assert.match(f.document.querySelector('.chat-title').textContent, /Client #ABC123/);
+  assert.match(f.document.querySelector('.chat-title').textContent, /Visible Client/);
+  assert.equal(f.document.body.textContent.includes('Client #ABC123'), false);
+  f.document.querySelector('[data-action="client-notes"]').click();
+  await until(() => f.document.querySelector('.note-content'));
+  assert.match(f.document.querySelector('.note-content').textContent, /Keep the client updated every hour/);
   assert.equal(f.document.querySelector('[data-action="create-room"]'), null);
   assert.equal(f.document.querySelector('[data-action="room-settings"]'), null);
   for (const value of ['ADMIN-ONLY CLIENT', 'SECRET-PHONE']) assert.equal(f.document.body.textContent.includes(value), false);
@@ -54,7 +60,17 @@ test('client access secret is exchanged once and removed from the visible URL', 
   assert.equal(f.calls.filter(call => call.path === '/api/client/session').length, 1);
   assert.equal(f.calls[0].data.key, 'private-secret');
   assert.match(f.document.querySelector('.chat-title').textContent, /Wingfactor Support/);
+  assert.equal(f.document.querySelector('.chat-title p'), null);
+  assert.match(f.document.querySelector('.composer-footer').textContent, /Securely connected/);
+  for (const removed of ['Your private support conversation', 'Private support room', 'Messages stay until your admin deletes them']) assert.equal(f.document.body.textContent.includes(removed), false);
   assert.equal(f.document.querySelector('.inbox'), null);
+});
+
+test('camera and video-call controls use the requested labels and icons', () => {
+  assert.match(script, /iconButton\('video', 'video-call'/);
+  assert.match(mediaScript, /data-camera="capture"/);
+  assert.match(mediaScript, /data-camera="flip"/);
+  assert.doesNotMatch(mediaScript, /Device camera or photo/);
 });
 
 test('sending through the composer renders text safely and clears the sent draft', async t => {

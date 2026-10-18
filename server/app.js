@@ -224,14 +224,18 @@ export function createApp(options = {}) {
     const result = { ...room, last: last ? { ...last, body: last.body || 'Attachment' } : null, unread,
       waitingSince: get('SELECT first_at FROM cycles WHERE room_id=?', room.id)?.first_at || null,
       agents: all(`SELECT u.id,u.name FROM users u JOIN assignments a ON a.user_id=u.id WHERE a.room_id=? AND u.disabled=0`, room.id) };
-    if (actor.role === 'admin') result.private = get('SELECT name,contact,notes FROM client_private WHERE room_id=?', room.id);
+    if (actor.role !== 'client') {
+      const details = get('SELECT name,contact,notes FROM client_private WHERE room_id=?', room.id);
+      if (actor.role === 'admin') result.private = details;
+      else result.client = { name: details?.name || '', notes: details?.notes || '' };
+    }
     return result;
   }
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(self), geolocation=()');
+    res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=()');
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
     res.setHeader('Cache-Control', 'no-store');
     if (origin.startsWith('https:')) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
@@ -398,10 +402,11 @@ export function createApp(options = {}) {
           const rows = all(`SELECT m.seq,m.id,m.sender_role,m.sender_id,m.body,m.created_at,m.attachment_id,
             a.filename,a.mime,a.size FROM messages m LEFT JOIN attachments a ON a.id=m.attachment_id
             WHERE m.room_id=? AND m.seq<? ORDER BY m.seq DESC LIMIT 100`, roomId, before);
-          // IDs only identify internal principals; no staff login or client contact information is joined.
+          // The display name is intentional; phone/email contact information is never joined here.
+          const clientLabel = actor.role === 'client' ? room.code : get('SELECT name FROM client_private WHERE room_id=?', roomId)?.name || room.code;
           return reply(200, { messages: rows.reverse().map(m => ({ ...m,
             own: m.sender_id === (actor.role === 'client' ? roomId : actor.id),
-            sender: m.sender_role === 'client' ? room.code : 'Wingfactor Support',
+            sender: m.sender_role === 'client' ? clientLabel : 'Wingfactor Support',
           })), hasMore: rows.length === 100 });
         }
         if (action === 'messages' && method === 'POST') {

@@ -66,7 +66,12 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
   unread=a.role==='client'?unread.neq('sender_role','client'):unread.eq('sender_role','client');
   const count=await unread;
   const r={...room,last:last[0]?{...last[0],body:last[0].body||'Attachment'}:null,unread:count.count||0,agents:assigned,waitingSince:cycle?.first_at||null};
-  if(a.role==='admin')r.private=await one('contacts','room_id',room.id);return r;
+  if(a.role!=='client'){
+   const details=await one('contacts','room_id',room.id);
+   if(a.role==='admin')r.private=details;
+   else r.client={name:details?.name||'',notes:details?.notes||''};
+  }
+  return r;
  }
  return async function handler(req){
   const headers=new Headers({'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'});
@@ -151,7 +156,8 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
      const before=Number(new URL(req.url).searchParams.get('before'))||Number.MAX_SAFE_INTEGER;
      const rows=await result(table('messages').select('*').eq('room_id',roomId).lt('seq',before).order('seq',{ascending:false}).limit(100));
      const fileIds=rows.map(m=>m.attachment_id).filter(Boolean);const files=fileIds.length?await result(table('attachments').select('id,filename,mime,size,expired,expires_at').in('id',fileIds)):[];
-     return reply({messages:rows.reverse().map(m=>{const f=files.find(f=>f.id===m.attachment_id);return {...m,...(f?{filename:f.filename,mime:f.mime,size:f.size,attachment_expired:f.expired||f.expires_at<=clock()}:{}),own:m.sender_id===(a.role==='client'?roomId:a.id),sender:m.sender_role==='client'?room.code:'Wingfactor Support'};}),hasMore:rows.length===100});
+     const clientLabel=a.role==='client'?room.code:(await one('contacts','room_id',roomId))?.name||room.code;
+     return reply({messages:rows.reverse().map(m=>{const f=files.find(f=>f.id===m.attachment_id);return {...m,...(f?{filename:f.filename,mime:f.mime,size:f.size,attachment_expired:f.expired||f.expires_at<=clock()}:{}),own:m.sender_id===(a.role==='client'?roomId:a.id),sender:m.sender_role==='client'?clientLabel:'Wingfactor Support'};}),hasMore:rows.length===100});
     }
     if(action==='messages'&&method==='POST'){
      await limit('message:'+a.sessionHash,120);const d=await json(req);check(typeof d.nonce==='string'&&/^[\w-]{10,100}$/.test(d.nonce),400,'Missing message identifier.');const value=str(d.body,10000);check(value||d.attachmentId,400,'Write a message or attach a file.');
