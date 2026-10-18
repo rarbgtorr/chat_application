@@ -21,7 +21,7 @@ Identity inside messages, filenames, recordings, or document contents remains vi
 - Netlify project: `wingfactor-support-chat` (site ID `370880c6-bc6f-4a7c-afe4-5f6899e3e2c2`).
 - Expected website origin: `https://wingfactor-support-chat.netlify.app`.
 - Supabase project: existing `interview-support-slot-booking` (`nmgjkexfgytjivxudsmo`) on the confirmed Free organisation. Chat uses separate `wc_` tables, the `wingchat` function, `wingchat-worker` job, and private `wingchat-media` bucket. The booking app's tables and functions are separate. Resources/quotas are shared.
-- `netlify.toml` builds `dist/`, proxies `/api/*` to the chat function, and provides the client room fallback plus security headers. No secret environment variable is needed in the frontend.
+- `netlify.toml` builds `dist/`, proxies `/api/*` to the chat function, and provides the client room fallback plus security headers. Matching `public/_redirects` and `public/_headers` files keep those rules in manual Netlify Drop deployments. No secret environment variable is needed in the frontend.
 
 The production website is deployed at `https://wingfactor-support-chat.netlify.app`. Source is saved in this GitHub repository; the current release was published with the CLI. Link the repository in Netlify if automatic deployment on pushes is wanted. Set production visitor access to Public; application accounts and private client links protect chat data. The account's default Netlify team-login gate must not block clients or service-worker notifications. Preview deployments should use a separate backend/configuration, because writes accept only the configured production origin.
 
