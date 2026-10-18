@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env server/index.js",
     "dev": "node --env-file-if-exists=.env --watch server/index.js",
-    "test": "node --test --test-concurrency=1",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
     "check": "node --check server/app.js && node --check server/store.js && node --check public/app.js && node --check public/sw.js && node --check supabase/functions/wingchat/core.js",
     "create-admin": "node --env-file-if-exists=.env scripts/create-admin.js",
     "build": "node scripts/build.js"
