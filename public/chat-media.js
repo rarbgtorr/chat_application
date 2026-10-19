@@ -30,10 +30,17 @@ export function sendCapturedPhoto(preview,file,document){
   if(preview(file,true)!==false)form.requestSubmit();
 }
 
+export class IncomingRingtone {
+  constructor({ring,timers=globalThis,interval=1400}){Object.assign(this,{ring,timers,interval});this.callId=null;this.timer=null;}
+  start(callId){if(this.callId===callId&&this.timer!==null)return;this.stop();this.callId=callId;this.ring();this.timer=this.timers.setInterval(()=>this.ring(),this.interval);}
+  stop(){if(this.timer!==null)this.timers.clearInterval(this.timer);this.timer=null;this.callId=null;}
+}
+
 export function installMedia({api,post,config,room,preview,modal,dismiss,toast,recording,beep}){
   const host=document.createElement('section');host.id='call-panel';host.className='call-panel hidden';host.setAttribute('aria-live','polite');document.body.append(host);
   const audio=document.createElement('audio');audio.autoplay=true;document.body.append(audio);
-  let camera=null,photo=null,photoUrl=null,closed=false,syncing=false,known=null,remoteStream=null,localStream=null;
+  let camera=null,photo=null,photoUrl=null,closed=false,syncing=false,remoteStream=null,localStream=null;
+  const ringtone=new IncomingRingtone({ring:beep});
   const attach=(selector,stream,muted=false)=>{const el=host.querySelector(selector);if(!el)return;el.muted=muted;if(el.srcObject!==stream)el.srcObject=stream;if(stream)void el.play().catch(()=>{});};
   const render=c=>{
     host.classList.toggle('hidden',!c);host.classList.toggle('video-call',c?.media==='video');if(!c){host.replaceChildren();return;}
@@ -50,7 +57,7 @@ export function installMedia({api,post,config,room,preview,modal,dismiss,toast,r
     if(video){attach('#call-remote-video',remoteStream);attach('#call-local-video',localStream,true);if(remoteStream&&host.querySelector('#call-remote-video')?.paused)add('Play call','play');}
     else{audio.srcObject=remoteStream;if(audio.paused&&audio.srcObject)add('Play call audio','play');}
   };
-  const voice=new VoiceCall({request:d=>post('/api/calls',d),mediaDevices:navigator.mediaDevices,PeerConnection:window.RTCPeerConnection,config,onChange:render,
+  const voice=new VoiceCall({request:d=>post('/api/calls',d),mediaDevices:navigator.mediaDevices,PeerConnection:window.RTCPeerConnection,config,onChange:c=>{render(c);if(c?.incoming&&c.status==='ringing')ringtone.start(c.id);else ringtone.stop();},
     onRemote:stream=>{remoteStream=stream;if(voice.call?.media==='video')attach('#call-remote-video',stream);else{audio.srcObject=stream;if(stream)void audio.play().catch(()=>render(voice.call));}},
     onLocal:stream=>{localStream=stream;attach('#call-local-video',stream,true);},onError:e=>toast(e.message)});
   const click=async e=>{const a=e.target.closest('[data-call-action]')?.dataset.callAction;if(!a)return;try{
@@ -91,12 +98,12 @@ export function installMedia({api,post,config,room,preview,modal,dismiss,toast,r
       if(voice.ready)await voice.poll();
       const calls=await api('/api/calls');voice.lastGood=Date.now();if(closed)return;
       if(voice.call&&!voice.ready&&!voice.busy&&!calls.some(c=>c.id===voice.call.id)){voice.clean();}
-      if(!voice.call){const c=calls.find(c=>c.incoming&&c.status==='ringing');if(c){voice.incoming(c);if(known!==c.id){beep();known=c.id;}}}
+      if(!voice.call){const c=calls.find(c=>c.incoming&&c.status==='ringing');if(c)voice.incoming(c);}
     }catch(e){if(e.status===401||e.status===403){voice.clean();}else if(voice.call&&voice.ready&&Date.now()-(voice.lastGood||Date.now())>45000)await voice.fail(new Error('Call server unreachable. Please reconnect.'));}
     finally{syncing=false;}
   }
   const timer=setInterval(()=>{if(voice.call||!document.hidden)void sync();},2000);
-  const leave=()=>{if(voice.call)void post('/api/calls',{action:voice.ready?'end':'decline',callId:voice.call.id}).catch(()=>{});voice.clean();closeCamera();};
+  const leave=()=>{ringtone.stop();if(voice.call)void post('/api/calls',{action:voice.ready?'end':'decline',callId:voice.call.id}).catch(()=>{});voice.clean();closeCamera();};
   window.addEventListener('pagehide',leave);
   return {sync,closeCamera,camera:openCamera,call:async(id,media='voice')=>{if(recording())throw new Error('Stop recording your voice note first.');await voice.start(id,media);},active:()=>Boolean(voice.call||voice.busy),close(){closed=true;clearInterval(timer);leave();host.remove();audio.remove();document.removeEventListener('click',cameraClick);document.querySelector('#modal').removeEventListener('close',closeCamera);document.querySelector('#modal').removeEventListener('cancel',closeCamera);window.removeEventListener('pagehide',leave);}};
 }

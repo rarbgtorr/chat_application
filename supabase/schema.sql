@@ -49,7 +49,7 @@ declare s record; begin
  for s in select p.endpoint from public.wc_subscriptions p join public.wc_sessions x on x.token_hash=p.session_hash
  where (p_user is not null and x.user_id=p_user) or (p_client is not null and x.room_id=p_client) loop
  insert into public.wc_push_jobs(endpoint,room_id,cycle_id,kind,payload,next_at,expires_at) values(s.endpoint,p_room,p_cycle,p_kind,
- jsonb_build_object('title',p_title,'body',p_body,'roomId',p_room,'tag',coalesce(p_room,'test')||'-'||p_kind,'url',case when p_client is not null then '/c/'||p_room else '/?room='||coalesce(p_room,'') end),public.wc_now(),public.wc_now()+86400000);
+ jsonb_build_object('title',p_title,'body',p_body,'kind',p_kind,'roomId',p_room,'tag',coalesce(p_room,'test')||'-'||p_kind,'url',case when p_client is not null then '/c/'||p_room else '/?room='||coalesce(p_room,'') end),public.wc_now(),public.wc_now()+86400000);
  end loop;
 end $$;
 create function public.wc_message(p_token text,p_room text,p_id text,p_body text,p_file text,p_nonce text) returns jsonb language plpgsql set search_path='' as $$

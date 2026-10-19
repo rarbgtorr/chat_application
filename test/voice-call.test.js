@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {VoiceCall} from '../public/voice-call.js';
-import {Camera,sendCapturedPhoto} from '../public/chat-media.js';
+import {Camera,IncomingRingtone,sendCapturedPhoto} from '../public/chat-media.js';
 function fixture(options={}){
  const requests=[],constraints=[],added=[];
  const audioTrack={kind:'audio',enabled:true,stopped:false,stop(){this.stopped=true;}},videoTrack={kind:'video',enabled:true,stopped:false,stop(){this.stopped=true;}};
@@ -70,4 +70,12 @@ test('camera send arrow attaches the captured photo and submits it immediately',
  const file={name:'captured.jpg'},calls=[];const form={requestSubmit(){calls.push('submit');}};
  sendCapturedPhoto((value,immediate)=>calls.push(value,immediate),file,{querySelector:selector=>selector==='#message-form'?form:null});
  assert.deepEqual(calls,[file,true,'submit']);
+});
+test('incoming ringtone repeats for one call and stops when the call changes state',()=>{
+ const rings=[],intervals=new Map();let next=1;
+ const timers={setInterval(fn,ms){const id=next++;intervals.set(id,{fn,ms});return id;},clearInterval(id){intervals.delete(id);}};
+ const ringtone=new IncomingRingtone({ring:()=>rings.push('ring'),timers,interval:1400});ringtone.start('call-one');
+ assert.equal(rings.length,1);assert.equal(intervals.size,1);assert.equal([...intervals.values()][0].ms,1400);
+ ringtone.start('call-one');assert.equal(rings.length,1);assert.equal(intervals.size,1);intervals.values().next().value.fn();assert.equal(rings.length,2);
+ ringtone.stop();assert.equal(intervals.size,0);assert.equal(ringtone.callId,null);
 });

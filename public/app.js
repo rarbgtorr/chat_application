@@ -39,6 +39,12 @@ async function api(path, options = {}) {
 const post = (path, data = {}) => api(path, { method: 'POST', body: JSON.stringify(data) });
 const formatTime = value => value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 const formatDay = value => new Date(value).toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
+function deliveryMark(status, failed = false) {
+  if (failed) return `<button type="button" class="delivery-retry" data-action="retry-send" aria-label="Retry sending" title="Retry sending"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8"/><path d="M10 5v6M10 15h.01"/></svg></button>`;
+  if (status === 'sending') return `<span class="delivery-mark sending" aria-label="Sending" title="Sending"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M10 5.5V10l3 2"/></svg></span>`;
+  const double = status === 'delivered' || status === 'read';
+  return `<span class="delivery-mark ${status}" aria-label="${status === 'read' ? 'Read' : status === 'delivered' ? 'Delivered' : 'Sent'}" title="${status === 'read' ? 'Read' : status === 'delivered' ? 'Delivered' : 'Sent'}"><svg viewBox="0 0 20 14" aria-hidden="true"><path d="M1.5 7.5 5 11l7.5-8.5"/>${double ? '<path d="M7 7.5 10.5 11 18 2.5"/>' : ''}</svg></span>`;
+}
 function age(value) { const minutes = Math.floor((Date.now() - value) / 60000); return minutes < 1 ? 'Just now' : minutes < 60 ? `${minutes}m` : new Date(value).toLocaleDateString([], { day: 'numeric', month: 'short' }); }
 const selectedRoom = () => state.rooms.find(room => room.id === state.roomId);
 const clientName = room => room?.private?.name || room?.client?.name || room?.code || 'Client';
@@ -104,17 +110,22 @@ function renderMessages(prepend = false) {
     if (day !== lastDay) { lastDay = day; divider = `<div class="day-divider" data-key="day-${esc(day)}">${esc(day)}</div>`; }
     let attachment = '';
     if (message.localUrl) {
-      const status = message.failed ? 'Not sent · Press Send to retry' : message.serverId ? 'Sent' : 'Sending…';
-      attachment = `<div class="attachment pending-attachment"><img src="${esc(message.localUrl)}" alt="${esc(message.filename)}"><small>${status}</small></div>`;
+      attachment = `<div class="attachment image-attachment pending-attachment"><img src="${esc(message.localUrl)}" alt="${esc(message.filename)}"></div>`;
     } else if (message.attachment_id && message.attachment_expired) {
       attachment = `<div class="attachment"><span class="small">Attachment expired · deleted after 7 days</span></div>`;
     } else if (message.attachment_id) {
       const src = `/api/media/${message.attachment_id}`;
-      const preview = message.mime?.startsWith('image/') ? `<a href="${src}" target="_blank" rel="noopener"><img src="${src}" alt="${esc(message.filename)}" loading="lazy"></a>` : message.mime?.startsWith('video/') ? `<video src="${src}" controls preload="metadata"></video>` : message.mime?.startsWith('audio/') ? `<audio src="${src}" controls preload="metadata"></audio>` : '';
-      attachment = `<div class="attachment">${preview}<a href="${src}?download=1" download>${icon('file')} ${esc(message.filename)}</a><small>${(message.size / 1024 / 1024).toFixed(2)} MB · Download</small></div>`;
+      const image = message.mime?.startsWith('image/');
+      const preview = image ? `<a href="${src}" target="_blank" rel="noopener"><img src="${src}" alt="${esc(message.filename)}" loading="lazy"></a>` : message.mime?.startsWith('video/') ? `<video src="${src}" controls preload="metadata"></video>` : message.mime?.startsWith('audio/') ? `<audio src="${src}" controls preload="metadata"></audio>` : '';
+      attachment = image ? `<div class="attachment image-attachment">${preview}</div>` : `<div class="attachment">${preview}<a href="${src}?download=1" download>${icon('file')} ${esc(message.filename)}</a><small>${(message.size / 1024 / 1024).toFixed(2)} MB · Download</small></div>`;
     }
-    const key = message.pending ? `${message.id}-${message.failed ? 'failed' : message.serverId ? 'sent' : 'sending'}` : `${message.id}-${Boolean(message.attachment_expired)}`;
-    return `${divider}<article data-key="${key}" class="message ${message.own ? 'own' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}"><div class="message-meta"><span>${esc(message.own ? 'You' : message.sender)}</span><time>${formatTime(message.created_at)}</time></div><div class="bubble">${esc(message.body)}${attachment}</div></article>`;
+    const receipt = state.me.role === 'client' && message.own && message.sender_role === 'client';
+    const delivery = message.pending ? message.failed ? 'failed' : message.serverId ? 'sent' : 'sending' : message.delivery || 'sent';
+    const imageMessage = Boolean(message.localUrl || (message.attachment_id && !message.attachment_expired && message.mime?.startsWith('image/')));
+    const key = message.pending ? `${message.id}-${delivery}` : `${message.id}-${Boolean(message.attachment_expired)}-${receipt ? delivery : ''}`;
+    const meta = message.own ? '' : `<div class="message-meta"><span>${esc(message.sender)}</span><time>${formatTime(message.created_at)}</time></div>`;
+    const status = `<span class="message-status"><time>${formatTime(message.created_at)}</time>${receipt ? deliveryMark(delivery, message.failed) : ''}</span>`;
+    return `${divider}<article data-key="${key}" class="message ${message.own ? 'own' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="bubble">${message.body ? `<span class="message-body">${esc(message.body)}</span>` : ''}${attachment}${status}</div></article>`;
   }).join('');
   const template = document.createElement('template');
   template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(clientName(room))}. Send a message to get started.`}</p></div>`}`;
@@ -144,7 +155,7 @@ async function loadMessages(roomId, before) {
   const result = await api(`/api/rooms/${roomId}/messages${before ? `?before=${before}` : ''}`);
   if (state.roomId !== roomId) return;
   const previousLast = state.messages.at(-1)?.seq;
-  const oldSignature = state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}`).join(',');
+  const oldSignature = state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.delivery || ''}`).join(',');
   if (before) state.messages = [...result.messages, ...state.messages];
   else {
     // Retain previously loaded pages when realtime refresh fetches the most recent page.
@@ -157,7 +168,7 @@ async function loadMessages(roomId, before) {
     if (!message.serverId || !savedIds.has(message.serverId)) return true;
     URL.revokeObjectURL(message.localUrl); return false;
   });
-  if (oldSignature !== state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}`).join(',') || !$('#messages')?.querySelector('.message')) renderMessages(Boolean(before));
+  if (oldSignature !== state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.delivery || ''}`).join(',') || !$('#messages')?.querySelector('.message')) renderMessages(Boolean(before));
   if (!before && previousLast && state.messages.at(-1)?.seq > previousLast && !state.messages.at(-1).own) beep();
   if (!document.hidden && state.messages.length) {
     await post(`/api/rooms/${roomId}/read`, { seq: state.messages.at(-1).seq });
@@ -178,7 +189,7 @@ async function refresh() {
   if (!state.me) return;
   if (state.loading) { state.queuedRefresh = true; return; } state.loading = true;
   try {
-    state.rooms = await api('/api/rooms'); renderList(); void state.media?.sync();
+    state.rooms = await api('/api/rooms'); renderList(); void acknowledgeDeliveries(); void state.media?.sync();
     if (state.roomId && !selectedRoom()) { state.roomId = null; state.messages = []; renderChat(); }
     if (state.roomId) {
       const closed = selectedRoom()?.status === 'closed';
@@ -233,7 +244,7 @@ async function boot() {
     const result = await api('/api/me'); state.me = result.user; state.push = result.push; state.realtime = result.realtime; state.calls=result.calls;
     state.media?.close();state.media=null;
     if(result.calls){const {installMedia}=await import('/chat-media.js');state.media=installMedia({api,post,config:result.calls,room:id=>{const r=state.rooms.find(x=>x.id===id);return r?{...r,code:state.me?.role==='client'?'Wingfactor Support':clientName(r)}:null;},preview:previewFile,modal,dismiss,toast,recording:()=>state.recorder?.state==='recording',beep});}
-    state.rooms = await api('/api/rooms');
+    state.rooms = await api('/api/rooms'); void acknowledgeDeliveries();
     state.roomId = state.me.role === 'client' ? state.me.roomId : new URLSearchParams(location.search).get('room');
     if (!selectedRoom()) state.roomId = null;
     workspace(); if (state.roomId) await loadMessages(state.roomId);
@@ -305,15 +316,19 @@ function previewFile(file, sendImmediately = false) {
   if (file.size > 25 * 1024 * 1024) { toast('Maximum attachment size is 25 MB.'); return false; }
   const form = $('#message-form');
   if (form?.dataset.pendingId) { removePendingMessage(form.dataset.pendingId); delete form.dataset.pendingId; }
-  state.file = file; $('#file-preview').classList.remove('hidden');
+  state.file = file; $('#file-preview').classList.toggle('hidden', sendImmediately);
   $('#file-preview').innerHTML = `<span>${esc(file.name)} · ${(file.size / 1024 / 1024).toFixed(2)} MB</span>${iconButton('close', 'remove-file', 'Remove attachment')}`;
   if (sendImmediately) {
     const pending = { id: `pending-${crypto.randomUUID()}`, roomId: state.roomId, created_at: Date.now(), own: true,
-      sender: state.me.name, body: '', filename: file.name, mime: file.type, size: file.size,
+      sender: state.me.name, sender_role: state.me.role, body: '', filename: file.name, mime: file.type, size: file.size,
       localUrl: URL.createObjectURL(file), pending: true, failed: false, serverId: null };
     state.pendingMessages.push(pending); form.dataset.pendingId = pending.id; renderMessages();
   }
   return true;
+}
+async function acknowledgeDeliveries() {
+  if (!state.me || state.me.role === 'client' || !state.rooms.length) return;
+  try { await post('/api/delivered', { roomIds: state.rooms.map(room => room.id).slice(0, 500) }); } catch {}
 }
 async function record() {
   if (state.recorder?.state === 'recording') { state.recorder.stop(); return; }
@@ -369,7 +384,7 @@ document.addEventListener('submit', async event => {
         form.dataset.attachment = uploaded.attachmentId;
       }
       const sent = await post(`/api/rooms/${roomId}/messages`, { body: value, attachmentId: form.dataset.attachment || null, nonce: form.dataset.nonce });
-      if (pending) { pending.serverId = sent.id; pending.failed = false; }
+      if (pending) { pending.serverId = sent.id; pending.failed = false; renderMessages(); }
       input.value = ''; state.file = null; $('#file-preview').classList.add('hidden');
       delete form.dataset.signature; delete form.dataset.nonce; delete form.dataset.attachment; delete form.dataset.pendingId;
       await refresh(); $('#messages').scrollTop = $('#messages').scrollHeight;
@@ -429,6 +444,7 @@ document.addEventListener('click', async event => {
         const form = $('#message-form'); if (form?.dataset.pendingId) removePendingMessage(form.dataset.pendingId);
         if (form) delete form.dataset.pendingId; state.file = null; $('#file-preview').classList.add('hidden'); break;
       }
+      case 'retry-send': if (!$('#send-button')?.disabled && state.file) $('#message-form')?.requestSubmit(); break;
       case 'record': if(state.media?.active())throw new Error('Finish your call before recording a voice note.'); await record(); break;
       case 'earlier': if (state.messages.length) await loadMessages(state.roomId, state.messages[0].seq); break;
       case 'logout': if (!confirm('Sign out on this device? Its support notifications will stop.')) break;

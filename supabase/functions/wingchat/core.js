@@ -39,6 +39,13 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
  const signal=roomId=>rpc('signal',{p_room:roomId||null});
  async function json(req){check((+req.headers.get('content-length')||0)<65536,413,'Request too large.');const raw=await req.text();check(raw.length<=65536,413,'Request too large.');try{const v=JSON.parse(raw);check(v&&typeof v==='object'&&!Array.isArray(v),400,'Invalid JSON.');return v;}catch(e){check(false,e.status||400,e.message||'Invalid JSON.');}}
  async function agents(roomId){const assignments=await result(table('assignments').select('user_id').eq('room_id',roomId));if(!assignments.length)return[];return result(table('users').select('id,name').in('id',assignments.map(x=>x.user_id)).eq('disabled',false));}
+ async function receiptRecipients(roomId){const assigned=await agents(roomId);if(assigned.length)return assigned.map(x=>x.id);return (await result(table('users').select('id').eq('role','admin').eq('disabled',false))).map(x=>x.id);}
+ async function receiptState(roomId){
+  const recipients=await receiptRecipients(roomId);if(!recipients.length)return {delivered:0,read:0};
+  const subjects=[...recipients,...recipients.map(x=>'delivered:'+x)];const markers=await result(table('reads').select('subject,seq').eq('room_id',roomId).in('subject',subjects));let delivered=0,read=0;
+  for(const marker of markers){if(marker.subject.startsWith('delivered:'))delivered=Math.max(delivered,marker.seq);else read=Math.max(read,marker.seq);}
+  return {delivered:Math.max(delivered,read),read};
+ }
  async function subscriptionsFor(userId,roomId){const sessions=await result(table('sessions').select('token_hash').eq(userId?'user_id':'room_id',userId||roomId));if(!sessions.length)return[];return result(table('subscriptions').select('*').in('session_hash',sessions.map(s=>s.token_hash)));}
  async function notify(userId,roomId,kind,title,message,client=false,cycle=null){await rpc('notify',{p_user:client?null:userId,p_client:client?roomId:null,p_room:roomId,p_kind:kind,p_cycle:cycle,p_title:title,p_body:message});}
  async function cleanup(){
@@ -123,6 +130,16 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
     if(d.password!==undefined){check(validPass(d.password),400,'Use 14–200 characters.');changes.password=await passwordHash(d.password);}if(typeof d.disabled==='boolean')changes.disabled=d.disabled;
     await patch('users','id',u.id,changes);await remove('sessions','user_id',u.id);await signal(null);return reply({ok:true});
    }
+   if(path==='/delivered'&&method==='POST'){
+    check(a.role!=='client',403,'Staff only.');const d=await json(req);check(Array.isArray(d.roomIds)&&d.roomIds.length<=500&&d.roomIds.every(x=>typeof x==='string'&&/^[\w-]{10,100}$/.test(x)),400,'Invalid conversations.');const changed=[];
+    for(const roomId of new Set(d.roomIds)){
+     const room=await one('rooms','id',roomId);if(!room)continue;const assigned=await agents(roomId);
+     const eligible=a.role==='agent'?assigned.some(x=>x.id===a.id):assigned.length===0;if(!eligible)continue;
+     const latest=await result(table('messages').select('seq').eq('room_id',roomId).eq('sender_role','client').order('seq',{ascending:false}).limit(1));const seq=latest[0]?.seq||0;if(!seq)continue;
+     const subject='delivered:'+a.id;const old=await result(table('reads').select('seq').eq('room_id',roomId).eq('subject',subject));if(seq>(old[0]?.seq||0)){await result(table('reads').upsert({room_id:roomId,subject,seq}));changed.push(roomId);}
+    }
+    await Promise.all(changed.map(signal));return reply({ok:true});
+   }
    if(path==='/rooms'){
     if(method==='GET'){
      let q=table('rooms').select('*').order('created_at',{ascending:false});
@@ -156,8 +173,8 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
      const before=Number(new URL(req.url).searchParams.get('before'))||Number.MAX_SAFE_INTEGER;
      const rows=await result(table('messages').select('*').eq('room_id',roomId).lt('seq',before).order('seq',{ascending:false}).limit(100));
      const fileIds=rows.map(m=>m.attachment_id).filter(Boolean);const files=fileIds.length?await result(table('attachments').select('id,filename,mime,size,expired,expires_at').in('id',fileIds)):[];
-     const clientLabel=a.role==='client'?room.code:(await one('contacts','room_id',roomId))?.name||room.code;
-     return reply({messages:rows.reverse().map(m=>{const f=files.find(f=>f.id===m.attachment_id);return {...m,...(f?{filename:f.filename,mime:f.mime,size:f.size,attachment_expired:f.expired||f.expires_at<=clock()}:{}),own:m.sender_id===(a.role==='client'?roomId:a.id),sender:m.sender_role==='client'?clientLabel:'Wingfactor Support'};}),hasMore:rows.length===100});
+     const clientLabel=a.role==='client'?room.code:(await one('contacts','room_id',roomId))?.name||room.code;const receipts=a.role==='client'?await receiptState(roomId):null;
+     return reply({messages:rows.reverse().map(m=>{const f=files.find(f=>f.id===m.attachment_id);const delivery=receipts&&m.sender_role==='client'?(receipts.read>=m.seq?'read':receipts.delivered>=m.seq?'delivered':'sent'):undefined;return {...m,...(f?{filename:f.filename,mime:f.mime,size:f.size,attachment_expired:f.expired||f.expires_at<=clock()}:{}),...(delivery?{delivery}:{}),own:m.sender_id===(a.role==='client'?roomId:a.id),sender:m.sender_role==='client'?clientLabel:'Wingfactor Support'};}),hasMore:rows.length===100});
     }
     if(action==='messages'&&method==='POST'){
      await limit('message:'+a.sessionHash,120);const d=await json(req);check(typeof d.nonce==='string'&&/^[\w-]{10,100}$/.test(d.nonce),400,'Missing message identifier.');const value=str(d.body,10000);check(value||d.attachmentId,400,'Write a message or attach a file.');
@@ -165,8 +182,8 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
     }
     if(action==='read'&&method==='POST'){
      const d=await json(req);const latest=await result(table('messages').select('seq').eq('room_id',roomId).order('seq',{ascending:false}).limit(1));const seq=Math.max(0,Math.min(latest[0]?.seq||0,Number(d.seq)||0));
-     const subject=a.role==='client'?'client:'+roomId:a.id;const old=await result(table('reads').select('seq').eq('room_id',roomId).eq('subject',subject));await result(table('reads').upsert({room_id:roomId,subject,seq:Math.max(seq,old[0]?.seq||0)}));
-     if(a.role!=='client')await result(table('alerts').update({seen:true}).eq('room_id',roomId).eq('user_id',a.id).in('kind',['message','assigned']));return reply({ok:true});
+     const subject=a.role==='client'?'client:'+roomId:a.id;const old=await result(table('reads').select('seq').eq('room_id',roomId).eq('subject',subject));const previous=old[0]?.seq||0;await result(table('reads').upsert({room_id:roomId,subject,seq:Math.max(seq,previous)}));
+     if(a.role!=='client'){await result(table('alerts').update({seen:true}).eq('room_id',roomId).eq('user_id',a.id).in('kind',['message','assigned']));if(seq>previous)await signal(roomId);}return reply({ok:true});
     }
     if(action==='upload'&&method==='POST'){
      check(room.status==='open',409,'Conversation is closed.');await limit('upload:'+a.sessionHash,20);const filename=str(decodeURIComponent(req.headers.get('x-filename')||''),200).replace(/[\x00-\x1f\\/]/g,'_');const ext=filename.split('.').at(-1).toLowerCase();let mime=types[ext];if(ext==='webm'&&req.headers.get('content-type')?.startsWith('audio/webm'))mime='audio/webm';check(mime,415,'Unsupported file type.');check((+req.headers.get('content-length')||0)<=26214400,413,'Maximum attachment size is 25 MB.');

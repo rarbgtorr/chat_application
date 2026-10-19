@@ -92,6 +92,22 @@ test('messages are bidirectional, idempotent, and safely retain raw text for esc
   assert.equal(f.app.store.get('SELECT * FROM cycles WHERE room_id=?', room.roomId), undefined);
 });
 
+test('client receipts progress from sent to delivered to read for the assigned teammate', async t => {
+  const f = await fixture(t), room = await f.room();
+  const message = await f.message('client', room.roomId, 'Please check this.');
+  let history = (await f.request('client', `/api/rooms/${room.roomId}/messages`)).data.messages;
+  assert.equal(history[0].delivery, 'sent');
+  assert.equal((await f.request('other', '/api/delivered', { method: 'POST', body: { roomIds: [room.roomId] } })).status, 200);
+  history = (await f.request('client', `/api/rooms/${room.roomId}/messages`)).data.messages;
+  assert.equal(history[0].delivery, 'sent');
+  assert.equal((await f.request('agent', '/api/delivered', { method: 'POST', body: { roomIds: [room.roomId] } })).status, 200);
+  history = (await f.request('client', `/api/rooms/${room.roomId}/messages`)).data.messages;
+  assert.equal(history[0].delivery, 'delivered');
+  await f.request('agent', `/api/rooms/${room.roomId}/read`, { method: 'POST', body: { seq: message.data.seq } });
+  history = (await f.request('client', `/api/rooms/${room.roomId}/messages`)).data.messages;
+  assert.equal(history[0].delivery, 'read');
+});
+
 test('attachments reach teammates directly, support ranges, and remain private to their room', async t => {
   const f = await fixture(t), room = await f.room();
   const upload = await f.request('client', `/api/rooms/${room.roomId}/upload`, { method: 'POST',
@@ -116,6 +132,7 @@ test('5-minute reminder and 10-minute admin escalation use the first unanswered 
   await f.subscribe('agent'); await f.subscribe('admin');
   await f.message('client', room.roomId, 'Need help.'); await f.app.tick();
   assert.equal(f.deliveries.filter(d => d.payload.title.startsWith('New message')).length, 1);
+  assert.equal(f.deliveries.find(d => d.payload.title.startsWith('New message')).payload.kind, 'message');
   f.advance(4 * 60000); await f.message('client', room.roomId, 'Additional context.'); await f.app.tick();
   assert.equal(f.app.store.all("SELECT * FROM alerts WHERE kind='reminder'").length, 0);
   f.advance(60000); await f.app.tick();

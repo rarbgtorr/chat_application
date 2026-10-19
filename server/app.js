@@ -116,7 +116,7 @@ export function createApp(options = {}) {
       ? all(`SELECT p.* FROM subscriptions p JOIN sessions s ON p.session_hash=s.token_hash WHERE s.user_id=?`, userId)
       : all(`SELECT p.* FROM subscriptions p JOIN sessions s ON p.session_hash=s.token_hash WHERE s.room_id=?`, clientRoomId);
     const payload = JSON.stringify({ title, body: message, url: clientRoomId ? `/c/${roomId}` : `/?room=${roomId}`,
-      tag: `${roomId}-${kind}`, roomId });
+      tag: `${roomId}-${kind}`, roomId, kind });
     for (const sub of subs) run('INSERT INTO push_jobs VALUES(?,?,?,?,?,?,?,?,?)', id(), sub.endpoint,
       roomId, cycleId, kind, payload, clock(), 0, clock() + 24 * 60 * 60 * 1000);
   }
@@ -125,6 +125,15 @@ export function createApp(options = {}) {
       WHERE a.room_id=? AND u.disabled=0`, roomId).map(u => u.id);
   }
   function adminIds() { return all("SELECT id FROM users WHERE role='admin' AND disabled=0").map(u => u.id); }
+  function recipientIds(roomId) { const assigned = agentIds(roomId); return assigned.length ? assigned : adminIds(); }
+  function receiptState(roomId) {
+    const recipients = new Set(recipientIds(roomId)); let delivered = 0; let read = 0;
+    for (const marker of all('SELECT subject,seq FROM read_markers WHERE room_id=?', roomId)) {
+      if (recipients.has(marker.subject)) read = Math.max(read, marker.seq);
+      if (marker.subject.startsWith('delivered:') && recipients.has(marker.subject.slice(10))) delivered = Math.max(delivered, marker.seq);
+    }
+    return { delivered: Math.max(delivered, read), read };
+  }
   function newMessage(actor, roomId, data) {
     const room = roomAccess(actor, roomId);
     ensure(room.status === 'open', 409, 'This conversation is closed. Ask the administrator to reopen it.');
@@ -331,6 +340,26 @@ export function createApp(options = {}) {
           run('DELETE FROM sessions WHERE user_id=?', userId);
         }); emit(null); return reply(200, { ok: true });
       }
+      if (path === '/api/delivered' && method === 'POST') {
+        ensure(actor.role !== 'client', 403, 'Staff only.'); const data = await jsonBody(req);
+        ensure(Array.isArray(data.roomIds) && data.roomIds.length <= 500 && data.roomIds.every(roomId => typeof roomId === 'string' && /^[\w-]{10,100}$/.test(roomId)), 400, 'Invalid conversations.');
+        const changed = [];
+        transaction(() => {
+          for (const roomId of new Set(data.roomIds)) {
+            const eligible = actor.role === 'agent'
+              ? Boolean(get('SELECT 1 FROM assignments WHERE room_id=? AND user_id=?', roomId, actor.id))
+              : agentIds(roomId).length === 0;
+            if (!eligible) continue;
+            const seq = get("SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND sender_role='client'", roomId)?.n || 0;
+            const subject = `delivered:${actor.id}`; const previous = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', roomId, subject)?.seq || 0;
+            if (seq > previous) {
+              run('INSERT INTO read_markers VALUES(?,?,?) ON CONFLICT(room_id,subject) DO UPDATE SET seq=MAX(seq,excluded.seq)', roomId, subject, seq);
+              changed.push(roomId);
+            }
+          }
+        });
+        changed.forEach(roomId => emit(roomId)); return reply(200, { ok: true });
+      }
       if (path === '/api/rooms' && method === 'GET') {
         const rooms = actor.role === 'admin' ? all('SELECT * FROM rooms ORDER BY created_at DESC') : actor.role === 'client'
           ? all('SELECT * FROM rooms WHERE id=?', actor.roomId)
@@ -404,9 +433,11 @@ export function createApp(options = {}) {
             WHERE m.room_id=? AND m.seq<? ORDER BY m.seq DESC LIMIT 100`, roomId, before);
           // The display name is intentional; phone/email contact information is never joined here.
           const clientLabel = actor.role === 'client' ? room.code : get('SELECT name FROM client_private WHERE room_id=?', roomId)?.name || room.code;
+          const receipts = actor.role === 'client' ? receiptState(roomId) : null;
           return reply(200, { messages: rows.reverse().map(m => ({ ...m,
             own: m.sender_id === (actor.role === 'client' ? roomId : actor.id),
             sender: m.sender_role === 'client' ? clientLabel : 'Wingfactor Support',
+            ...(receipts && m.sender_role === 'client' ? { delivery: m.seq <= receipts.read ? 'read' : m.seq <= receipts.delivered ? 'delivered' : 'sent' } : {}),
           })), hasMore: rows.length === 100 });
         }
         if (action === 'messages' && method === 'POST') {
@@ -417,9 +448,10 @@ export function createApp(options = {}) {
         if (action === 'read' && method === 'POST') {
           const data = await jsonBody(req); const subject = actor.role === 'client' ? `client:${roomId}` : actor.id;
           const latest = get('SELECT MAX(seq) AS n FROM messages WHERE room_id=?', roomId).n || 0;
-          const seq = Math.max(0, Math.min(latest, Number(data.seq) || 0));
+          const seq = Math.max(0, Math.min(latest, Number(data.seq) || 0)); const previous = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', roomId, subject)?.seq || 0;
           run('INSERT INTO read_markers VALUES(?,?,?) ON CONFLICT(room_id,subject) DO UPDATE SET seq=MAX(seq,excluded.seq)', roomId, subject, seq);
           if (actor.role !== 'client') run("UPDATE alerts SET seen=1 WHERE room_id=? AND user_id=? AND kind IN ('message','assigned')", roomId, actor.id);
+          if (actor.role !== 'client' && seq > previous) emit(roomId);
           return reply(200, { ok: true });
         }
         if (action === 'upload' && method === 'POST') {

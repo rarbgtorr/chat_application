@@ -7,7 +7,9 @@ const html = await readFile(new URL('../public/index.html', import.meta.url), 'u
 const script = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
 const mediaScript = await readFile(new URL('../public/chat-media.js', import.meta.url), 'utf8');
 const styles = await readFile(new URL('../public/style.css', import.meta.url), 'utf8');
+const serviceWorker = await readFile(new URL('../public/sw.js', import.meta.url), 'utf8');
 const callFix = await readFile(new URL('../supabase/migrations/20261019141500_fix_call_finish_ambiguity.sql', import.meta.url), 'utf8');
+const receiptMigration = await readFile(new URL('../supabase/migrations/20261019145343_whatsapp_receipts_and_assigned_call_ringing.sql', import.meta.url), 'utf8');
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
@@ -34,7 +36,8 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null } = {}) {
     else if (path.endsWith('/upload') && options.method === 'POST') {
       uploadedFile = options.body; if (uploadGate) await uploadGate; result = { attachmentId: 'attachment123' };
     } else if (path.endsWith('/messages') && options.method === 'POST') {
-      const m = { id: `m${messages.length}`, seq: messages.length + 1, body: data.body, sender: 'Wingfactor Support', own: true, created_at: Date.now(),
+      const m = { id: `m${messages.length}`, seq: messages.length + 1, body: data.body, sender: 'Wingfactor Support', own: true, sender_role: role, created_at: Date.now(),
+        ...(role === 'client' ? { delivery: 'sent' } : {}),
         ...(data.attachmentId ? { attachment_id: data.attachmentId, filename: uploadedFile.name, mime: uploadedFile.type, size: uploadedFile.size } : {}) };
       messages.push(m); result = { id: m.id, seq: m.seq };
     } else if (path.includes('/messages')) result = { messages: [...messages], hasMore: false };
@@ -85,17 +88,19 @@ test('camera and video-call controls use the requested labels and icons', () => 
 
 test('captured photo appears immediately while its upload continues', async t => {
   let finishUpload; const uploadGate = new Promise(resolve => { finishUpload = resolve; });
-  const f = await ui(t, { uploadGate });
+  const f = await ui(t, { role: 'client', uploadGate });
   const photo = new f.window.File(['photo bytes'], 'captured.jpg', { type: 'image/jpeg' });
   assert.equal(f.window.previewFile(photo, true), true);
   f.document.querySelector('#message-form').requestSubmit();
   const pending = f.document.querySelector('.pending-message');
-  assert.ok(pending); assert.match(pending.textContent, /Sending/);
+  assert.ok(pending); assert.ok(pending.querySelector('.delivery-mark.sending[aria-label="Sending"]'));
+  assert.equal(f.document.querySelector('#file-preview').classList.contains('hidden'), true);
   assert.match(pending.querySelector('img').src, /^blob:test-/); assert.equal(f.messages.length, 0);
   finishUpload();
   await until(() => f.document.querySelector('.message:not(.pending-message) img'));
   assert.equal(f.document.querySelector('.pending-message'), null);
   assert.match(f.document.querySelector('.message img').src, /\/api\/media\/attachment123$/);
+  assert.equal(f.document.querySelector('.message .attachment a').textContent, '');
 });
 
 test('call cleanup avoids ambiguous notification columns and secure status is aligned', () => {
@@ -104,6 +109,8 @@ test('call cleanup avoids ambiguous notification columns and secure status is al
   assert.match(callFix, /a\.kind='call'/);
   assert.doesNotMatch(callFix, /declare[^;]*\bkind text/);
   assert.match(styles, /\.composer-footer>span\{display:inline-flex;align-items:center;gap:5px/);
+  assert.match(serviceWorker, /requireInteraction: call/);
+  assert.match(receiptMigration, /role_name='agent' or not exists/);
 });
 
 test('sending through the composer renders text safely and clears the sent draft', async t => {
@@ -111,11 +118,23 @@ test('sending through the composer renders text safely and clears the sent draft
   input.value = '<img src=x onerror=alert(1)> Hello';
   f.document.querySelector('#message-form').dispatchEvent(new f.window.Event('submit', { bubbles: true, cancelable: true }));
   await until(() => f.document.querySelector('.message'));
-  assert.equal(f.document.querySelector('.bubble').textContent, '<img src=x onerror=alert(1)> Hello');
+  assert.equal(f.document.querySelector('.message-body').textContent, '<img src=x onerror=alert(1)> Hello');
   assert.equal(f.document.querySelector('.bubble img'), null);
   assert.equal(input.value, '');
   const send = f.calls.find(call => call.path.endsWith('/messages') && call.method === 'POST');
   assert.ok(send.data.nonce); assert.equal(send.data.body, '<img src=x onerror=alert(1)> Hello');
+});
+
+test('client text messages show one sent tick, two delivered ticks, and blue read ticks', async t => {
+  const f = await ui(t, { role: 'client' });
+  const message = { id: 'receipt-message', seq: 1, body: 'Are you there?', sender: 'Client', sender_role: 'client', own: true, created_at: Date.now(), delivery: 'sent' };
+  f.messages.push(message); await f.window.refresh();
+  assert.equal(f.document.querySelector('.delivery-mark.sent svg').querySelectorAll('path').length, 1);
+  f.messages[0] = { ...message, delivery: 'delivered' }; await f.window.refresh();
+  assert.equal(f.document.querySelector('.delivery-mark.delivered svg').querySelectorAll('path').length, 2);
+  f.messages[0] = { ...message, delivery: 'read' }; await f.window.refresh();
+  assert.equal(f.document.querySelector('.delivery-mark.read svg').querySelectorAll('path').length, 2);
+  assert.match(styles, /\.delivery-mark\.read\{color:#53bdeb/);
 });
 
 test('live updates preserve existing media DOM elements and unsent drafts', async t => {

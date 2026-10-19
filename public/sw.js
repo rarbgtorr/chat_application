@@ -5,11 +5,17 @@ self.addEventListener('push', event => {
   let payload = { title: 'Wingfactor Support', body: 'You have a new support notification.', url: '/' };
   try { payload = { ...payload, ...event.data.json() }; } catch {}
   const target = new URL(payload.url || '/', self.location.origin);
-  event.waitUntil(self.registration.showNotification(payload.title, {
+  const call = payload.kind === 'call';
+  const notification = self.registration.showNotification(payload.title, {
     body: payload.body, icon: '/icon.svg', badge: '/icon.svg',
-    tag: payload.tag || 'support', renotify: true, vibrate: [200, 100, 200],
+    tag: payload.tag || 'support', renotify: true, requireInteraction: call,
+    vibrate: call ? [500, 200, 500, 200, 500] : [200, 100, 200],
     data: { url: target.origin === self.location.origin ? target.href : self.location.origin },
-  }));
+  });
+  const delivered = payload.kind === 'message' && payload.roomId
+    ? fetch('/api/delivered', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomIds: [payload.roomId] }) }).catch(() => {})
+    : Promise.resolve();
+  event.waitUntil(Promise.allSettled([notification, delivered]));
 });
 self.addEventListener('notificationclick', event => {
   event.notification.close();
