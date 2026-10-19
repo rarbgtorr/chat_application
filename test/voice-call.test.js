@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {VoiceCall} from '../public/voice-call.js';
-import {Camera} from '../public/chat-media.js';
+import {Camera,sendCapturedPhoto} from '../public/chat-media.js';
 function fixture(options={}){
  const requests=[],constraints=[],added=[];
  const audioTrack={kind:'audio',enabled:true,stopped:false,stop(){this.stopped=true;}},videoTrack={kind:'video',enabled:true,stopped:false,stop(){this.stopped=true;}};
@@ -65,4 +65,9 @@ test('camera capture creates a JPEG, stops the stream, and switches facing mode'
  const track={stop(){this.stopped=true;}};const facing=[];const video={srcObject:null,videoWidth:3000,videoHeight:1500,play:async()=>{}};
  const c=new Camera({devices:{getUserMedia:async q=>{facing.push(q.video.facingMode.ideal);return {getTracks:()=>[track]};}},video});await c.open();await c.flip();assert.deepEqual(facing,['environment','user']);
  const canvas={getContext:()=>({drawImage(){}}),toBlob:cb=>cb(new Blob(['photo'],{type:'image/jpeg'}))};const file=await c.capture({createElement:()=>canvas});assert.equal(canvas.width,2000);assert.equal(canvas.height,1000);assert.equal(file.type,'image/jpeg');assert.match(file.name,/\.jpg$/);assert.ok(track.stopped);assert.equal(video.srcObject,null);
+});
+test('camera send arrow attaches the captured photo and submits it immediately',()=>{
+ const file={name:'captured.jpg'},calls=[];const form={requestSubmit(){calls.push('submit');}};
+ sendCapturedPhoto(value=>calls.push(value),file,{querySelector:selector=>selector==='#message-form'?form:null});
+ assert.deepEqual(calls,[file,'submit']);
 });

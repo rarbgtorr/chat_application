@@ -24,6 +24,12 @@ export class Camera {
   }
 }
 
+export function sendCapturedPhoto(preview,file,document){
+  const form=document.querySelector('#message-form');
+  if(!form?.requestSubmit)throw new Error('This conversation is unavailable. Please try again.');
+  preview(file);form.requestSubmit();
+}
+
 export function installMedia({api,post,config,room,preview,modal,dismiss,toast,recording,beep}){
   const host=document.createElement('section');host.id='call-panel';host.className='call-panel hidden';host.setAttribute('aria-live','polite');document.body.append(host);
   const audio=document.createElement('audio');audio.autoplay=true;document.body.append(audio);
@@ -73,7 +79,7 @@ export function installMedia({api,post,config,room,preview,modal,dismiss,toast,r
         document.querySelector('.camera-capture').classList.add('hidden');document.querySelector('[data-camera="flip"]').classList.add('hidden');
         document.querySelector('[data-camera="retake"]').classList.remove('hidden');document.querySelector('[data-camera="use"]').classList.remove('hidden');
       }
-      if(action==='use'&&photo){const file=photo;dismiss();closeCamera();preview(file);}
+      if(action==='use'&&photo){const file=photo;sendCapturedPhoto(preview,file,document);dismiss();closeCamera();}
     }catch(error){toast(error.message);}
   };
   document.addEventListener('click',cameraClick);
