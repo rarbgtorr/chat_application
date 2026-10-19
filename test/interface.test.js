@@ -6,6 +6,8 @@ import { JSDOM } from 'jsdom';
 const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 const script = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
 const mediaScript = await readFile(new URL('../public/chat-media.js', import.meta.url), 'utf8');
+const styles = await readFile(new URL('../public/style.css', import.meta.url), 'utf8');
+const callFix = await readFile(new URL('../supabase/migrations/20261019141500_fix_call_finish_ambiguity.sql', import.meta.url), 'utf8');
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
@@ -71,6 +73,14 @@ test('camera and video-call controls use the requested labels and icons', () => 
   assert.match(mediaScript, /data-camera="capture"/);
   assert.match(mediaScript, /data-camera="flip"/);
   assert.doesNotMatch(mediaScript, /Device camera or photo/);
+});
+
+test('call cleanup avoids ambiguous notification columns and secure status is aligned', () => {
+  assert.match(callFix, /call_kind text/);
+  assert.match(callFix, /j\.kind='call'/);
+  assert.match(callFix, /a\.kind='call'/);
+  assert.doesNotMatch(callFix, /declare[^;]*\bkind text/);
+  assert.match(styles, /\.composer-footer>span\{display:inline-flex;align-items:center;gap:5px/);
 });
 
 test('sending through the composer renders text safely and clears the sent draft', async t => {
