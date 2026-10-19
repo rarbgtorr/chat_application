@@ -72,6 +72,9 @@ test('camera and video-call controls use the requested labels and icons', () => 
   assert.match(script, /iconButton\('video', 'video-call'/);
   assert.match(mediaScript, /data-camera="capture"/);
   assert.match(mediaScript, /data-camera="flip"/);
+  assert.match(mediaScript, /class="camera-send hidden"[^>]+aria-label="Send photo"/);
+  assert.doesNotMatch(mediaScript, />Use photo</);
+  assert.match(styles, /\.camera-send\{background:#25a65a;color:#fff/);
   assert.doesNotMatch(mediaScript, /Device camera or photo/);
 });
 

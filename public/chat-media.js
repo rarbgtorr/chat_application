@@ -1,6 +1,7 @@
 import {VoiceCall} from './voice-call.js';
 const cameraIcon='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h4l2-3h6l2 3h4v15H3Z"/><circle cx="12" cy="13" r="4"/></svg>';
 const switchIcon='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7-4 4 4 4M3 11h13a4 4 0 0 1 4 4v2M17 3l4 4-4 4M21 7H8a4 4 0 0 0-4 4"/></svg>';
+const sendIcon='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m22 2-7 20-4-9L2 9 22 2ZM22 2 11 13"/></svg>';
 
 export class Camera {
   constructor({devices,video,onError=()=>{}}){Object.assign(this,{devices,video,onError});this.facing='environment';this.generation=0;}
@@ -55,7 +56,7 @@ export function installMedia({api,post,config,room,preview,modal,dismiss,toast,r
   const closeCamera=()=>{camera?.stop();camera=null;photo=null;if(photoUrl)URL.revokeObjectURL(photoUrl);photoUrl=null;document.querySelector('#modal')?.classList.remove('camera-dialog');};
   async function openCamera(){
     if(voice.call||voice.busy)throw new Error('Finish your call before taking a photo.');
-    modal('Take a photo',`<div class="camera-view"><video id="camera-video" autoplay playsinline muted></video><img id="camera-photo" class="hidden" alt="Photo preview"></div><p id="camera-error" role="status"></p><div class="camera-controls"><span class="camera-side"><button class="secondary hidden" type="button" data-camera="retake">Retake</button></span><span class="camera-capture"><button class="camera-shutter" type="button" data-camera="capture" aria-label="Take photo" title="Take photo">${cameraIcon}</button><span>Take photo</span></span><span class="camera-side camera-side-right"><button class="camera-switch" type="button" data-camera="flip" aria-label="Switch camera" title="Switch camera">${switchIcon}</button><button class="primary hidden" type="button" data-camera="use">Use photo</button></span></div>`);
+    modal('Take a photo',`<div class="camera-view"><video id="camera-video" autoplay playsinline muted></video><img id="camera-photo" class="hidden" alt="Photo preview"></div><p id="camera-error" role="status"></p><div class="camera-controls"><span class="camera-side"><button class="secondary hidden" type="button" data-camera="retake">Retake</button></span><span class="camera-capture"><button class="camera-shutter" type="button" data-camera="capture" aria-label="Take photo" title="Take photo">${cameraIcon}</button><span>Take photo</span></span><span class="camera-side camera-side-right"><button class="camera-switch" type="button" data-camera="flip" aria-label="Switch camera" title="Switch camera">${switchIcon}</button><button class="camera-send hidden" type="button" data-camera="use" aria-label="Send photo" title="Send photo">${sendIcon}</button></span></div>`);
     document.querySelector('#modal').classList.add('camera-dialog');
     camera=new Camera({devices:navigator.mediaDevices,video:document.querySelector('#camera-video')});
     try{await camera.open();}catch(e){closeCamera();document.querySelector('#modal')?.classList.add('camera-dialog');const error=document.querySelector('#camera-error');if(error)error.textContent=e.name==='NotAllowedError'?'Camera permission was denied. Allow camera access in your browser settings.':e.message;}
