@@ -25,7 +25,8 @@ const iconButton = (name, action, title) => `<button class="icon-btn" type="butt
 const brand = `<div class="brand"><span class="brand-mark">w<span>·</span></span><div><strong>wingfactor</strong><small>Support workspace</small></div></div>`;
 const state = { me: null, rooms: [], users: [], roomId: null, messages: [], hasMore: false,
   filter: 'all', search: '', file: null, stream: null, connected: false, alerts: [], push: null,
-  recorder: null, recordingTimer: null, loading: false, queuedRefresh: false, sound: null };
+  recorder: null, recordingTimer: null, loading: false, queuedRefresh: false, sound: null,
+  pendingMessages: [] };
 let toastTimer, refreshTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 5000); }
 async function api(path, options = {}) {
@@ -96,18 +97,24 @@ function renderMessages(prepend = false) {
   const oldHeight = container.scrollHeight; const scrollTop = container.scrollTop;
   const atBottom = oldHeight - scrollTop - container.clientHeight < 120;
   const room = selectedRoom(); let lastDay = '';
-  const rows = state.messages.map(message => {
+  const savedIds = new Set(state.messages.map(message => message.id));
+  const messages = [...state.messages, ...state.pendingMessages.filter(message => message.roomId === state.roomId && !savedIds.has(message.serverId))];
+  const rows = messages.map(message => {
     const day = formatDay(message.created_at); let divider = '';
     if (day !== lastDay) { lastDay = day; divider = `<div class="day-divider" data-key="day-${esc(day)}">${esc(day)}</div>`; }
     let attachment = '';
-    if (message.attachment_id && message.attachment_expired) {
+    if (message.localUrl) {
+      const status = message.failed ? 'Not sent · Press Send to retry' : message.serverId ? 'Sent' : 'Sending…';
+      attachment = `<div class="attachment pending-attachment"><img src="${esc(message.localUrl)}" alt="${esc(message.filename)}"><small>${status}</small></div>`;
+    } else if (message.attachment_id && message.attachment_expired) {
       attachment = `<div class="attachment"><span class="small">Attachment expired · deleted after 7 days</span></div>`;
     } else if (message.attachment_id) {
       const src = `/api/media/${message.attachment_id}`;
       const preview = message.mime?.startsWith('image/') ? `<a href="${src}" target="_blank" rel="noopener"><img src="${src}" alt="${esc(message.filename)}" loading="lazy"></a>` : message.mime?.startsWith('video/') ? `<video src="${src}" controls preload="metadata"></video>` : message.mime?.startsWith('audio/') ? `<audio src="${src}" controls preload="metadata"></audio>` : '';
       attachment = `<div class="attachment">${preview}<a href="${src}?download=1" download>${icon('file')} ${esc(message.filename)}</a><small>${(message.size / 1024 / 1024).toFixed(2)} MB · Download</small></div>`;
     }
-    return `${divider}<article data-key="${message.id}-${Boolean(message.attachment_expired)}" class="message ${message.own ? 'own' : ''}"><div class="message-meta"><span>${esc(message.own ? 'You' : message.sender)}</span><time>${formatTime(message.created_at)}</time></div><div class="bubble">${esc(message.body)}${attachment}</div></article>`;
+    const key = message.pending ? `${message.id}-${message.failed ? 'failed' : message.serverId ? 'sent' : 'sending'}` : `${message.id}-${Boolean(message.attachment_expired)}`;
+    return `${divider}<article data-key="${key}" class="message ${message.own ? 'own' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}"><div class="message-meta"><span>${esc(message.own ? 'You' : message.sender)}</span><time>${formatTime(message.created_at)}</time></div><div class="bubble">${esc(message.body)}${attachment}</div></article>`;
   }).join('');
   const template = document.createElement('template');
   template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(clientName(room))}. Send a message to get started.`}</p></div>`}`;
@@ -145,6 +152,11 @@ async function loadMessages(roomId, before) {
     state.messages = [...state.messages.filter(m => m.seq < first), ...result.messages];
   }
   if (before || state.messages.length <= 100) state.hasMore = result.hasMore;
+  const savedIds = new Set(state.messages.map(message => message.id));
+  state.pendingMessages = state.pendingMessages.filter(message => {
+    if (!message.serverId || !savedIds.has(message.serverId)) return true;
+    URL.revokeObjectURL(message.localUrl); return false;
+  });
   if (oldSignature !== state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}`).join(',') || !$('#messages')?.querySelector('.message')) renderMessages(Boolean(before));
   if (!before && previousLast && state.messages.at(-1)?.seq > previousLast && !state.messages.at(-1).own) beep();
   if (!document.hidden && state.messages.length) {
@@ -282,10 +294,26 @@ async function showAlerts() {
   state.alerts = await api('/api/alerts');
   modal('Notifications', `<p class="modal-description">Unread updates and unanswered-client reminders.</p>${state.alerts.map(alert => `<div class="alert-row"><span class="tag ${alert.kind === 'escalation' ? 'waiting' : ''}">${esc(alert.kind)}</span> <strong>${esc(alert.code)}</strong><p>${esc(alert.body)} · ${age(alert.created_at)}</p><button class="secondary" data-alert-room="${alert.room_id}">Open conversation</button></div>`).join('') || '<div class="settings-note">All caught up. New alerts will appear here.</div>'}<div class="modal-actions"><button class="secondary" data-action="clear-alerts">Mark alerts as seen</button></div>`);
 }
-function previewFile(file) {
-  if (file.size > 25 * 1024 * 1024) return toast('Maximum attachment size is 25 MB.');
+function removePendingMessage(id, rerender = true) {
+  const pending = state.pendingMessages.find(message => message.id === id);
+  if (!pending) return;
+  URL.revokeObjectURL(pending.localUrl);
+  state.pendingMessages = state.pendingMessages.filter(message => message.id !== id);
+  if (rerender) renderMessages();
+}
+function previewFile(file, sendImmediately = false) {
+  if (file.size > 25 * 1024 * 1024) { toast('Maximum attachment size is 25 MB.'); return false; }
+  const form = $('#message-form');
+  if (form?.dataset.pendingId) { removePendingMessage(form.dataset.pendingId); delete form.dataset.pendingId; }
   state.file = file; $('#file-preview').classList.remove('hidden');
   $('#file-preview').innerHTML = `<span>${esc(file.name)} · ${(file.size / 1024 / 1024).toFixed(2)} MB</span>${iconButton('close', 'remove-file', 'Remove attachment')}`;
+  if (sendImmediately) {
+    const pending = { id: `pending-${crypto.randomUUID()}`, roomId: state.roomId, created_at: Date.now(), own: true,
+      sender: state.me.name, body: '', filename: file.name, mime: file.type, size: file.size,
+      localUrl: URL.createObjectURL(file), pending: true, failed: false, serverId: null };
+    state.pendingMessages.push(pending); form.dataset.pendingId = pending.id; renderMessages();
+  }
+  return true;
 }
 async function record() {
   if (state.recorder?.state === 'recording') { state.recorder.stop(); return; }
@@ -330,6 +358,8 @@ document.addEventListener('submit', async event => {
       if (state.recorder?.state === 'recording') throw new Error('Stop the voice recording before sending.');
       const input = $('#message-input'); const value = input.value.trim(); const roomId = state.roomId;
       if (!value && !state.file) return;
+      const pending = state.pendingMessages.find(message => message.id === form.dataset.pendingId);
+      if (pending?.failed) { pending.failed = false; renderMessages(); }
       // Keep the same nonce and attachment on retry when the server response is lost.
       const signature = `${value}|${state.file?.name || ''}|${state.file?.size || ''}`;
       if (form.dataset.signature !== signature) { form.dataset.signature = signature; form.dataset.nonce = crypto.randomUUID(); delete form.dataset.attachment; }
@@ -338,12 +368,18 @@ document.addEventListener('submit', async event => {
           headers: { 'X-Filename': encodeURIComponent(state.file.name), 'Content-Type': state.file.type || 'application/octet-stream' } });
         form.dataset.attachment = uploaded.attachmentId;
       }
-      await post(`/api/rooms/${roomId}/messages`, { body: value, attachmentId: form.dataset.attachment || null, nonce: form.dataset.nonce });
+      const sent = await post(`/api/rooms/${roomId}/messages`, { body: value, attachmentId: form.dataset.attachment || null, nonce: form.dataset.nonce });
+      if (pending) { pending.serverId = sent.id; pending.failed = false; }
       input.value = ''; state.file = null; $('#file-preview').classList.add('hidden');
-      delete form.dataset.signature; delete form.dataset.nonce; delete form.dataset.attachment;
+      delete form.dataset.signature; delete form.dataset.nonce; delete form.dataset.attachment; delete form.dataset.pendingId;
       await refresh(); $('#messages').scrollTop = $('#messages').scrollHeight;
+      if (pending && state.pendingMessages.includes(pending)) renderMessages();
     }
   } catch (error) {
+    if (form.id === 'message-form' && form.dataset.pendingId) {
+      const pending = state.pendingMessages.find(message => message.id === form.dataset.pendingId);
+      if (pending) { pending.failed = true; renderMessages(); }
+    }
     const target = form.querySelector('.form-error') || $('#login-error');
     if (target) target.textContent = error.message; else toast(error.message);
   } finally { if (button?.isConnected) { button.disabled = false; button.innerHTML = oldLabel; } }
@@ -389,7 +425,10 @@ document.addEventListener('click', async event => {
       case 'video-call': await state.media?.call(state.roomId, 'video'); break;
       case 'camera': await state.media?.camera(); break;
       case 'attach': $('#file-input').click(); break;
-      case 'remove-file': state.file = null; $('#file-preview').classList.add('hidden'); break;
+      case 'remove-file': {
+        const form = $('#message-form'); if (form?.dataset.pendingId) removePendingMessage(form.dataset.pendingId);
+        if (form) delete form.dataset.pendingId; state.file = null; $('#file-preview').classList.add('hidden'); break;
+      }
       case 'record': if(state.media?.active())throw new Error('Finish your call before recording a voice note.'); await record(); break;
       case 'earlier': if (state.messages.length) await loadMessages(state.roomId, state.messages[0].seq); break;
       case 'logout': if (!confirm('Sign out on this device? Its support notifications will stop.')) break;

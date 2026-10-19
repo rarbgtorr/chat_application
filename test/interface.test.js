@@ -11,7 +11,7 @@ const callFix = await readFile(new URL('../supabase/migrations/20261019141500_fi
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
-async function ui(t, { role = 'agent', link = false } = {}) {
+async function ui(t, { role = 'agent', link = false, uploadGate = null } = {}) {
   const roomId = 'room123'; const calls = []; const messages = [];
   const dom = new JSDOM(html, { url: `http://localhost:3000/${role === 'client' ? `c/${roomId}${link ? '#key=private-secret' : ''}` : '?room=room123'}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
@@ -19,6 +19,8 @@ async function ui(t, { role = 'agent', link = false } = {}) {
   window.HTMLDialogElement.prototype.close = function () { this.open = false; };
   window.EventSource = class { addEventListener() {} close() {} };
   window.confirm = () => true;
+  let objectUrl = 0; window.URL.createObjectURL = () => `blob:test-${++objectUrl}`; window.URL.revokeObjectURL = () => {};
+  let uploadedFile = null;
   const room = { id: roomId, code: 'Client #ABC123', status: 'open', created_at: Date.now(), unread: 0,
     agents: [{ id: 'agent123', name: 'Support teammate' }], waitingSince: null,
     ...(role === 'agent' ? { client: { name: 'Visible Client', notes: 'Keep the client updated every hour.' } } : {}),
@@ -29,8 +31,11 @@ async function ui(t, { role = 'agent', link = false } = {}) {
     let result;
     if (path === '/api/me') result = { user: { id: role === 'client' ? roomId : 'agent123', name: 'Support teammate', role, roomId: role === 'client' ? roomId : undefined }, push: { enabled: false, devices: 0 } };
     else if (path === '/api/rooms') result = [room];
-    else if (path.endsWith('/messages') && options.method === 'POST') {
-      const m = { id: `m${messages.length}`, seq: messages.length + 1, body: data.body, sender: 'Wingfactor Support', own: true, created_at: Date.now() };
+    else if (path.endsWith('/upload') && options.method === 'POST') {
+      uploadedFile = options.body; if (uploadGate) await uploadGate; result = { attachmentId: 'attachment123' };
+    } else if (path.endsWith('/messages') && options.method === 'POST') {
+      const m = { id: `m${messages.length}`, seq: messages.length + 1, body: data.body, sender: 'Wingfactor Support', own: true, created_at: Date.now(),
+        ...(data.attachmentId ? { attachment_id: data.attachmentId, filename: uploadedFile.name, mime: uploadedFile.type, size: uploadedFile.size } : {}) };
       messages.push(m); result = { id: m.id, seq: m.seq };
     } else if (path.includes('/messages')) result = { messages: [...messages], hasMore: false };
     else if (path === '/api/client/session') result = { roomId };
@@ -76,6 +81,21 @@ test('camera and video-call controls use the requested labels and icons', () => 
   assert.doesNotMatch(mediaScript, />Use photo</);
   assert.match(styles, /\.camera-send\{background:#25a65a;color:#fff/);
   assert.doesNotMatch(mediaScript, /Device camera or photo/);
+});
+
+test('captured photo appears immediately while its upload continues', async t => {
+  let finishUpload; const uploadGate = new Promise(resolve => { finishUpload = resolve; });
+  const f = await ui(t, { uploadGate });
+  const photo = new f.window.File(['photo bytes'], 'captured.jpg', { type: 'image/jpeg' });
+  assert.equal(f.window.previewFile(photo, true), true);
+  f.document.querySelector('#message-form').requestSubmit();
+  const pending = f.document.querySelector('.pending-message');
+  assert.ok(pending); assert.match(pending.textContent, /Sending/);
+  assert.match(pending.querySelector('img').src, /^blob:test-/); assert.equal(f.messages.length, 0);
+  finishUpload();
+  await until(() => f.document.querySelector('.message:not(.pending-message) img'));
+  assert.equal(f.document.querySelector('.pending-message'), null);
+  assert.match(f.document.querySelector('.message img').src, /\/api\/media\/attachment123$/);
 });
 
 test('call cleanup avoids ambiguous notification columns and secure status is aligned', () => {

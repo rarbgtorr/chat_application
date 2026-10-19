@@ -68,6 +68,6 @@ test('camera capture creates a JPEG, stops the stream, and switches facing mode'
 });
 test('camera send arrow attaches the captured photo and submits it immediately',()=>{
  const file={name:'captured.jpg'},calls=[];const form={requestSubmit(){calls.push('submit');}};
- sendCapturedPhoto(value=>calls.push(value),file,{querySelector:selector=>selector==='#message-form'?form:null});
- assert.deepEqual(calls,[file,'submit']);
+ sendCapturedPhoto((value,immediate)=>calls.push(value,immediate),file,{querySelector:selector=>selector==='#message-form'?form:null});
+ assert.deepEqual(calls,[file,true,'submit']);
 });

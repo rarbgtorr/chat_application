@@ -27,7 +27,7 @@ export class Camera {
 export function sendCapturedPhoto(preview,file,document){
   const form=document.querySelector('#message-form');
   if(!form?.requestSubmit)throw new Error('This conversation is unavailable. Please try again.');
-  preview(file);form.requestSubmit();
+  if(preview(file,true)!==false)form.requestSubmit();
 }
 
 export function installMedia({api,post,config,room,preview,modal,dismiss,toast,recording,beep}){
