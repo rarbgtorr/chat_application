@@ -82,8 +82,8 @@ test('all roles can change appearance without losing their draft or recreating t
     assert.equal(f.document.querySelector('meta[name="color-scheme"]').content, 'only dark');
     assert.equal(f.window.localStorage.getItem('wingfactor-chat-theme'), 'dark');
     assert.equal(f.document.querySelector('[data-theme-choice="dark"]').getAttribute('aria-pressed'), 'true');
-    assert.equal(f.window.getComputedStyle(header).backgroundColor, 'rgb(24, 39, 31)');
-    assert.equal(f.window.getComputedStyle(f.document.querySelector('.composer')).backgroundColor, 'rgb(28, 46, 35)');
+    assert.equal(f.window.getComputedStyle(header).backgroundColor, 'rgb(32, 44, 51)');
+    assert.equal(f.window.getComputedStyle(f.document.querySelector('.composer')).backgroundColor, 'rgb(42, 57, 66)');
     assert.equal(f.document.querySelector('#message-input'), input);
     assert.equal(input.value, 'My unsent draft');
     assert.equal(f.document.querySelector('.chat-header'), header);

@@ -43,26 +43,32 @@ dialog.camera-dialog{inset:0;width:100vw;height:100dvh;max-width:none;max-height
 .theme-options button:hover{color:var(--ink)}
 .auth-appearance{margin-bottom:28px}
 .appearance-note{margin-top:9px;font-size:12px;color:var(--muted)}
-:root[data-theme="dark"]{color-scheme:only dark;--ink:#e8efeb;--muted:#a5b7ae;--green:#9bd2b8;--line:#36463e;--paper:#111c18;--cream:#263c31;--red:#ffb4a9}
-:root[data-theme="dark"] .inbox,:root[data-theme="dark"] dialog:not(.camera-dialog){background:#1a2922}
-:root[data-theme="dark"] .chat-header{background:#18271f}
-:root[data-theme="dark"] .bubble{background:#22352a;border-color:#3a4d40}
-:root[data-theme="dark"] .own .bubble{background:#174c37;color:#f1f4ed;border-color:#296148}
-:root[data-theme="dark"] .composer,:root[data-theme="dark"] .field input,:root[data-theme="dark"] .field textarea,:root[data-theme="dark"] .field select{background:#1c2e23;color:var(--ink);border-color:var(--line)}
-:root[data-theme="dark"] input::placeholder,:root[data-theme="dark"] textarea::placeholder{color:#a5b7ae;opacity:1}
-:root[data-theme="dark"] .room-item.selected{background:#293e30;border-color:#45604c}
-:root[data-theme="dark"] .avatar{color:#b6dac0}
-:root[data-theme="dark"] .primary,:root[data-theme="dark"] .send,:root[data-theme="dark"] .count{background:#236344;color:#fff}
-:root[data-theme="dark"] .primary:hover{background:#2c7953}
-:root[data-theme="dark"] .tag{background:#28442e;color:#c0e2c3}
-:root[data-theme="dark"] .tag.waiting{background:#493c23;color:#f1d09d}
-:root[data-theme="dark"] .notification-banner{background:#393b22;border-color:#555638;color:#e1dfb3}
-:root[data-theme="dark"] .notification-banner button{background:#515435;color:#f1edcc}
-:root[data-theme="dark"] .file-preview{background:#263b2c}
+:root[data-theme="dark"]{color-scheme:only dark;--ink:#e9edef;--muted:#aebac1;--green:#00a884;--line:#38434a;--paper:#0b141a;--cream:#2a3942;--forest:#202c33;--red:#ffb4ab}
+:root[data-theme="dark"] .inbox,:root[data-theme="dark"] dialog:not(.camera-dialog){background:#111b21}
+:root[data-theme="dark"] .chat-header,:root[data-theme="dark"] .composer-wrap{background:#202c33}
+:root[data-theme="dark"] .bubble{background:#202c33;border-color:#202c33}
+:root[data-theme="dark"] .own .bubble{background:#005c4b;color:#e9edef;border-color:#005c4b}
+:root[data-theme="dark"] .composer,:root[data-theme="dark"] .field input,:root[data-theme="dark"] .field textarea,:root[data-theme="dark"] .field select{background:#2a3942;color:var(--ink);border-color:var(--line)}
+:root[data-theme="dark"] input::placeholder,:root[data-theme="dark"] textarea::placeholder{color:#aebac1;opacity:1}
+:root[data-theme="dark"] .room-item.selected{background:#2a3942;border-color:#38434a}
+:root[data-theme="dark"] .avatar{color:#d1d7db}
+:root[data-theme="dark"] .primary,:root[data-theme="dark"] .send,:root[data-theme="dark"] .count{background:#00a884;color:#071e17}
+:root[data-theme="dark"] .primary:hover{background:#06bf96}
+:root[data-theme="dark"] .tag{background:#2a3942;color:#d1d7db}
+:root[data-theme="dark"] .tag.waiting{background:#3b3525;color:#f1d09d}
+:root[data-theme="dark"] .notification-banner{background:#202c33;border-color:#38434a;color:#d1d7db}
+:root[data-theme="dark"] .notification-banner button{background:#2a3942;color:#e9edef}
+:root[data-theme="dark"] .file-preview,:root[data-theme="dark"] .profile .avatar{background:#2a3942}
 :root[data-theme="dark"] .icon-btn:hover{background:#ffffff12}
-:root[data-theme="dark"] .danger,:root[data-theme="dark"] .message-delete-trigger{background:#402b27;border-color:#705048;color:var(--red)}
-:root[data-theme="dark"] .message-delete-trigger:hover{background:#55352e}
-:root[data-theme="dark"] .theme-options button[aria-pressed="true"]{background:#2d4634}
-:root[data-theme="dark"] .message-status,:root[data-theme="dark"] .composer-bar,:root[data-theme="dark"] .composer-footer,:root[data-theme="dark"] .composer-hint,:root[data-theme="dark"] .day-divider,:root[data-theme="dark"] .list-foot,:root[data-theme="dark"] .auth-note,:root[data-theme="dark"] .room-bottom small{color:var(--muted)}
+:root[data-theme="dark"] .danger,:root[data-theme="dark"] .message-delete-trigger{background:#402b2b;border-color:#705050;color:var(--red)}
+:root[data-theme="dark"] .message-delete-trigger:hover{background:#553535}
+:root[data-theme="dark"] .theme-options button[aria-pressed="true"]{background:#2a3942}
+:root[data-theme="dark"] .message-status,:root[data-theme="dark"] .composer-bar,:root[data-theme="dark"] .composer-footer,:root[data-theme="dark"] .composer-hint,:root[data-theme="dark"] .day-divider,:root[data-theme="dark"] .list-foot,:root[data-theme="dark"] .auth-note,:root[data-theme="dark"] .room-bottom small,:root[data-theme="dark"] .nav-label,:root[data-theme="dark"] .profile small,:root[data-theme="dark"] .rail-note,:root[data-theme="dark"] .auth-story>p,:root[data-theme="dark"] .auth-story .auth-foot,:root[data-theme="dark"] .auth-story .eyebrow{color:var(--muted)}
 :root[data-theme="dark"] .message.own .message-status{color:#c6d5d0}
 :root[data-theme="dark"] .image-message .message-status{color:#fff}
+:root[data-theme="dark"] .rail,:root[data-theme="dark"] .auth-story{color:var(--ink)}
+:root[data-theme="dark"] .nav-item{color:#aebac1}
+:root[data-theme="dark"] .nav-item.active{background:#2a3942;color:#e9edef}
+:root[data-theme="dark"] .call-panel{border-color:#38434a}
+:root[data-theme="dark"] .call-panel p{color:#d1d7db}
+:root[data-theme="dark"] .image-viewer,:root[data-theme="dark"] .call-videos{background:#0b141a}
