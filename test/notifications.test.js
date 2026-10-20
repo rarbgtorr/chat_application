@@ -2,15 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
+import { MessageChannel } from 'node:worker_threads';
 
 const script = await readFile(new URL('../public/sw.js', import.meta.url), 'utf8');
-function worker() {
+function worker(windows = []) {
   const handlers = {}, shown = [], delivered = [];
   runInNewContext(script, {
-    URL,
+    URL, MessageChannel, setTimeout, clearTimeout,
     fetch: async (...args) => { delivered.push(args); },
     self: {
       location: { origin: 'https://chat.example' },
+      clients: { matchAll: async () => windows },
       addEventListener: (name, handler) => { handlers[name] = handler; },
       registration: {
         showNotification: async (title, options) => { shown.push({ title, ...options }); },
@@ -36,6 +38,23 @@ test('chat pushes remain silent while still grouping and acknowledging every mes
   await w.push(payload);
   assert.equal(w.shown[2].renotify, false);
   assert.equal(w.shown[2].silent, true);
+});
+
+test('visible matching chat suppresses push, while background tabs and different chats keep it', async () => {
+  const notices = [], roomId = 'room-one';
+  const window = { url: 'https://chat.example/?room=room-one', visibilityState: 'visible',
+    postMessage(message, ports) { if (message.type === 'chat-visibility') ports[0].postMessage({ visible: message.roomId === roomId }); else notices.push(message); } };
+  const open = worker([window]);
+  await open.push({ kind: 'message', roomId, title: 'New message' });
+  assert.equal(open.shown.length, 0); assert.equal(open.delivered.length, 1); assert.equal(notices[0].type, 'chat-message');
+  await open.push({ kind: 'reply', roomId: 'room-two', title: 'New image' });
+  assert.equal(open.shown.length, 1);
+  window.visibilityState = 'hidden';
+  await open.push({ kind: 'reply', roomId, title: 'New message' });
+  assert.equal(open.shown.length, 2);
+  window.visibilityState = 'visible';
+  await open.push({ kind: 'call', roomId, title: 'Incoming video call' });
+  assert.equal(open.shown.length, 3); assert.equal(open.shown[2].requireInteraction, true);
 });
 
 test('only incoming voice and video calls request audible push alerts', async () => {

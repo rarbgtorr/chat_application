@@ -30,6 +30,38 @@ const state = { me: null, rooms: [], users: [], roomId: null, messages: [], hasM
   recorder: null, recordingTimer: null, loading: false, queuedRefresh: false, sound: null,
   pendingMessages: [], selectedMessageId: null };
 let toastTimer, refreshTimer, messagePress, suppressMessageClick;
+const chatActivity = { tabId: crypto.randomUUID(), roomId: null, signature: '', sentAt: 0, typingUntil: 0, chain: Promise.resolve() };
+const typers = new Map();
+function chatIsVisible(roomId = state.roomId) {
+  if (!state.me || document.hidden || !roomId || state.roomId !== roomId || !selectedRoom() || !$('#messages')) return false;
+  return state.me.role === 'client' || !window.matchMedia?.('(max-width: 760px)').matches || Boolean($('.layout.has-room'));
+}
+function reportActivity(force = false) {
+  if (!state.me) return;
+  const active = chatIsVisible(), roomId = active ? state.roomId : chatActivity.roomId;
+  if (!roomId) return;
+  const now = Date.now(), typing = Boolean(active && selectedRoom()?.status === 'open' && $('#message-input')?.value.trim() && chatActivity.typingUntil > now);
+  const signature = `${roomId}:${active}:${typing}`;
+  if (!force && signature === chatActivity.signature && (!active || now - chatActivity.sentAt < (typing ? 2000 : 10000))) return;
+  chatActivity.roomId = roomId; chatActivity.signature = signature; chatActivity.sentAt = now;
+  const payload = { tabId: chatActivity.tabId, roomId, active, typing };
+  chatActivity.chain = chatActivity.chain.catch(() => {}).then(() => post('/api/activity', payload)).catch(() => {});
+}
+function renderTyping() {
+  const indicator = $('#typing-indicator'); if (!indicator) return;
+  for (const [key, value] of typers) if (value.until <= Date.now()) typers.delete(key);
+  const active = chatIsVisible() ? [...typers.values()].filter(item => item.roomId === state.roomId) : [];
+  indicator.classList.toggle('hidden', !active.length); $('.chat-title')?.classList.toggle('typing', Boolean(active.length));
+  indicator.textContent = !active.length ? '' : active.length > 1 ? 'People are typing…' : active[0].role === 'client' ? 'Client is typing…' : 'Support is typing…';
+}
+function receiveTyping(payload) {
+  if (!payload || typeof payload.roomId !== 'string' || typeof payload.subject !== 'string' || payload.subject === state.me?.id || !['client','agent','admin'].includes(payload.role)) return;
+  const key = `${payload.roomId}:${payload.subject}`;
+  if (payload.typing && Number(payload.ttl) > 0) typers.set(key, { roomId: payload.roomId, role: payload.role, until: Date.now() + Math.min(6000, Number(payload.ttl)) });
+  else typers.delete(key);
+  renderTyping();
+}
+function stopTyping() { chatActivity.typingUntil = 0; reportActivity(true); }
 function toast(message, duration = 5000) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), duration); }
 async function api(path, options = {}) {
   const headers = { ...(options.body && !(options.body instanceof Blob) ? { 'Content-Type': 'application/json' } : {}), ...options.headers };
@@ -86,6 +118,7 @@ function openMessageImage(messageId) {
 }
 
 function auth(error = '') {
+  stopTyping(); typers.clear(); chatActivity.signature = '';
   state.stream?.close(); state.media?.close(); state.media=null; state.me = null;
   const clientPage = location.pathname.startsWith('/c/');
   $('#app').innerHTML = `<main class="auth"><section class="auth-story">${brand}<div class="eyebrow">A little closer. A lot simpler.</div><h1>Good support<br>starts with a<br><em>conversation.</em></h1><p>One private space for your questions, files, and the people here to help.</p><div class="auth-foot">WINGFACTOR IT SUPPORT<br>Thoughtful support. Connected people.</div></section><section class="auth-form"><div class="auth-form-inner">${clientPage ? `<h2>Your private support space</h2><p>Open the original support link shared with you to access your conversation. If your access was revoked, ask Wingfactor for a new link.</p><div class="error">${esc(error)}</div>` : `<div class="eyebrow muted">Team workspace</div><h2>Welcome back.</h2><p>Sign in to pick up your conversations.</p><form id="login-form"><label class="field"><span>Username</span><input name="username" autocomplete="username" required placeholder="Your team username"></label><label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required placeholder="Enter your password"></label><div class="error" id="login-error">${esc(error)}</div><button class="primary" type="submit">Sign in ${icon('send')}</button></form><div class="auth-note">You’ll stay signed in on this device.<br>Clients: use the private link shared with you.</div>`}</div></section></main>`;
@@ -120,16 +153,19 @@ function renderList() {
   $('#list-count').textContent = `${state.rooms.length} conversation${state.rooms.length === 1 ? '' : 's'} · history stays saved`;
 }
 function renderChat() {
+  chatActivity.typingUntil = 0;
   clearMessageSelection();
   const room = selectedRoom();
   $('.layout')?.classList.toggle('has-room', Boolean(room));
   if (!room) {
     $('#conversation').innerHTML = `<div class="chat-empty"><div class="chat-empty-inner"><span class="brand-mark">w<span>·</span></span><div class="eyebrow">Your support workspace</div><h2>A clear space.<br>A better conversation.</h2><p>Select a conversation to read messages, share files, and help your clients move forward.</p>${state.me.role === 'admin' ? `<button class="primary" data-action="create-room">${icon('plus')} Create a conversation</button>` : ''}</div></div>`;
+    reportActivity(true);
     return;
   }
   const client = state.me.role === 'client', displayName = client ? 'Wingfactor Support' : clientName(room);
   $('#conversation').innerHTML = `<header class="chat-header">${!client ? `<span class="mobile-back">${iconButton('back', 'back', 'Back to conversations')}</span>` : ''}<span class="avatar">${client ? 'W' : initials(displayName)}</span><div class="chat-title"><h2>${esc(displayName)}</h2>${client ? '' : `<p>${room.agents.length ? `Assigned to ${esc(room.agents.map(a => a.name).join(', '))}` : 'No teammate assigned'}</p>`}</div><div class="header-actions"><span class="connection"><span class="dot"></span><span id="connection-text">Connecting…</span></span><span class="tag">${room.status === 'open' ? 'Open' : 'Closed'}</span>${state.calls && room.status==='open' ? `${iconButton('phone', 'voice-call', 'Start voice call')}${iconButton('video', 'video-call', 'Start video call')}` : ''}${state.me.role === 'agent' ? iconButton('note', 'client-notes', 'View client notes') : ''}${iconButton('bell', 'settings', 'Notification settings')}${state.me.role === 'admin' ? iconButton('more', 'room-settings', 'Conversation settings') : ''}</div></header><div id="notification-banner"></div><div class="messages" id="messages" role="log" aria-label="Conversation messages" aria-live="polite"></div><div class="composer-wrap">${room.status === 'open' ? `<form class="composer" id="message-form"><div id="file-preview" class="file-preview hidden"></div><label class="hidden" for="message-input">Message</label><textarea id="message-input" placeholder="Write a message…" maxlength="10000"></textarea><div class="composer-bar">${iconButton('clip', 'attach', 'Attach a file')}${state.calls ? iconButton('camera', 'camera', 'Take a photo') : ''}${iconButton('mic', 'record', 'Record or stop a voice note')}<span class="composer-hint">Enter to send · Shift + Enter for a new line</span><button class="send" id="send-button" type="submit">Send ${icon('send')}</button></div><input type="file" id="file-input" class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,.mp3,.m4a,.ogg,.wav,.pdf,.doc,.docx,.txt,.csv"></form><div class="composer-footer">${client ? `<span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Securely connected</span>` : `<span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Private support room</span><span>Messages stay until your admin deletes them.</span>`}</div>` : `<div class="settings-note">This conversation is closed. Your history and files are still available.</div>`}</div>`;
-  state.file = null; renderMessages(); notificationBanner(); connection(state.connected);
+  const indicator = document.createElement('p'); indicator.id = 'typing-indicator'; indicator.className = 'hidden'; indicator.setAttribute('role', 'status'); indicator.setAttribute('aria-live', 'polite'); $('.chat-title').append(indicator);
+  state.file = null; renderMessages(); notificationBanner(); connection(state.connected); renderTyping(); reportActivity(true);
 }
 function renderMessages(prepend = false) {
   const container = $('#messages'); if (!container) return;
@@ -209,7 +245,7 @@ async function loadMessages(roomId, before) {
     if (message.localUrl) URL.revokeObjectURL(message.localUrl); return false;
   });
   if (oldSignature !== state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.deleted_at || ''}:${m.deleted_by_me || ''}:${m.delivery || ''}`).join(',') || !$('#messages')?.querySelector('.message')) renderMessages(Boolean(before));
-  if (!document.hidden && state.messages.length) {
+  if (chatIsVisible(roomId) && state.messages.length) {
     await post(`/api/rooms/${roomId}/read`, { seq: state.messages.at(-1).seq });
     const room = selectedRoom(); if (room) room.unread = 0; renderList();
   }
@@ -251,11 +287,12 @@ async function startEvents() {
       const { connect } = await import('/realtime.js');
       state.stream = connect(state.realtime, () => {
         clearTimeout(refreshTimer); refreshTimer = setTimeout(() => void refresh(), 100);
-      }, status => { connection(status === 'SUBSCRIBED'); if (status === 'SUBSCRIBED') void refresh(); });
+      }, status => { connection(status === 'SUBSCRIBED'); if (status === 'SUBSCRIBED') { reportActivity(true); void refresh(); } }, receiveTyping);
     } catch { connection(false); }
     return;
   }
   const stream = new EventSource('/api/events'); state.stream = stream;
+  stream.addEventListener('typing', event => { try { receiveTyping(JSON.parse(event.data)); } catch {} });
   stream.addEventListener('connected', () => { connection(true); void refresh(); });
   for (const type of ['change', 'alert']) stream.addEventListener(type, () => {
     clearTimeout(refreshTimer); refreshTimer = setTimeout(() => void refresh(), 100);
@@ -452,7 +489,7 @@ document.addEventListener('submit', async event => {
       } else {
         pending.body = value; pending.file ||= file; pending.nonce ||= crypto.randomUUID();
       }
-      input.value = ''; state.file = null; $('#file-preview').classList.add('hidden');
+      input.value = ''; stopTyping(); state.file = null; $('#file-preview').classList.add('hidden');
       delete form.dataset.pendingId; renderMessages();
       void sendPendingMessage(pending); return;
     }
@@ -561,7 +598,7 @@ document.addEventListener('click', async event => {
       case 'clear-message-selection': clearMessageSelection(); break;
       case 'close-modal': dismiss(); break;
       case 'back': state.media?.closeCamera(); if (state.recorder?.state === 'recording') throw new Error('Stop your recording first.'); state.roomId = null; renderChat(); break;
-      case 'conversations': $('.layout').classList.remove('has-room'); break;
+      case 'conversations': $('.layout').classList.remove('has-room'); stopTyping(); break;
       case 'settings': showSettings(); break;
       case 'enable-push': await enablePush(); break;
       case 'test-push': toast((await post('/api/push/test')).message); break;
@@ -596,7 +633,11 @@ document.addEventListener('click', async event => {
     }
   } catch (error) { toast(error.message); }
 });
-document.addEventListener('input', event => { if (event.target.id === 'room-search') { state.search = event.target.value; renderList(); } });
+document.addEventListener('input', event => {
+  if (event.target.id === 'room-search') { state.search = event.target.value; renderList(); }
+  if (event.target.id === 'message-input') { chatActivity.typingUntil = event.target.value.trim() ? Date.now() + 3500 : 0; reportActivity(); }
+});
+document.addEventListener('focusout', event => { if (event.target.id === 'message-input') stopTyping(); });
 document.addEventListener('change', event => { if (event.target.id === 'file-input' && event.target.files[0]) { previewFile(event.target.files[0]); event.target.value = ''; } });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') { clearMessageSelection(); return; }
@@ -608,7 +649,18 @@ document.addEventListener('keydown', event => {
     event.preventDefault(); if (!$('#send-button').disabled) $('#message-form').requestSubmit();
   }
 });
-document.addEventListener('visibilitychange', () => { if (!document.hidden && state.me) void refresh(); });
+document.addEventListener('visibilitychange', () => { stopTyping(); renderTyping(); if (!document.hidden && state.me) void refresh(); });
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', event => {
+  if (event.data?.type === 'chat-visibility') event.ports[0]?.postMessage({ visible: chatIsVisible(event.data.roomId) });
+  if (event.data?.type === 'chat-message' && chatIsVisible(event.data.roomId)) void refresh();
+});
+window.addEventListener('pagehide', () => {
+  if (!state.me || !chatActivity.roomId) return;
+  const payload = JSON.stringify({ roomId: chatActivity.roomId, tabId: chatActivity.tabId, active: false, typing: false });
+  if (navigator.sendBeacon) navigator.sendBeacon('/api/activity', new Blob([payload], { type: 'application/json' }));
+  else void fetch('/api/activity', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: payload, keepalive: true }).catch(() => {});
+});
+setInterval(() => { reportActivity(); renderTyping(); }, 1000);
 window.addEventListener('online', () => { if (state.me) { startEvents(); void refresh(); } });
 window.addEventListener('offline', () => connection(false));
 window.addEventListener('beforeunload', event => {

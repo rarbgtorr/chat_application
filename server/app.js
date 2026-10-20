@@ -54,7 +54,7 @@ export function createApp(options = {}) {
   const store = openStore(directory);
   const { get, all, run, transaction } = store;
   const clock = options.clock || Date.now;
-  const streams = new Set(); const rate = new Map();
+  const streams = new Set(); const rate = new Map(); const activity = new Map();
   let busy = false, shuttingDown = false;
   const keyPath = join(directory, 'vapid.json');
   const vapid = existsSync(keyPath) ? JSON.parse(readFileSync(keyPath, 'utf8')) : webpush.generateVAPIDKeys();
@@ -119,6 +119,14 @@ export function createApp(options = {}) {
       tag: `${roomId}-${kind}`, roomId, kind });
     for (const sub of subs) run('INSERT INTO push_jobs VALUES(?,?,?,?,?,?,?,?,?)', id(), sub.endpoint,
       roomId, cycleId, kind, payload, clock(), 0, clock() + 24 * 60 * 60 * 1000);
+  }
+  function emitTyping(actor, roomId) {
+    const until = Math.max(0, ...[...activity.values()].filter(item => item.roomId === roomId && item.expiresAt > clock() && principal(item.sessionHash)?.id === actor.id && canAccess(principal(item.sessionHash), roomId)).map(item => item.typingUntil));
+    const payload = { roomId, subject: actor.id, role: actor.role, typing: until > clock(), ttl: Math.max(0, Math.min(6000, until - clock())) };
+    for (const stream of streams) {
+      const recipient = principal(stream.tokenHash);
+      if (recipient && recipient.id !== actor.id && canAccess(recipient, roomId)) stream.res.write(`event: typing\ndata: ${JSON.stringify(payload)}\n\n`);
+    }
   }
   function agentIds(roomId) {
     return all(`SELECT u.id FROM users u JOIN assignments a ON a.user_id=u.id
@@ -207,6 +215,7 @@ export function createApp(options = {}) {
     if (busy || shuttingDown) return;
     busy = true;
     try {
+      for (const [key, entry] of activity) if (entry.expiresAt <= clock() || !principal(entry.sessionHash)) activity.delete(key);
       await cleanupDeletedFiles();
       scheduleEscalations();
       run('DELETE FROM push_jobs WHERE expires_at<?', clock());
@@ -218,6 +227,11 @@ export function createApp(options = {}) {
         if (!get('SELECT id FROM push_jobs WHERE id=?', job.id)) return;
         const actor = principal(job.session_hash);
         if (!actor || (job.room_id && !canAccess(actor, job.room_id))) { run('DELETE FROM push_jobs WHERE id=?', job.id); return; }
+        if (['message', 'reply'].includes(job.kind) && [...activity.values()].some(item => item.sessionHash === job.session_hash && item.roomId === job.room_id && item.expiresAt > clock())) {
+          const latest = get(`SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND deleted_at IS NULL AND ${actor.role === 'client' ? "sender_role IN ('admin','agent')" : "sender_role='client'"}`, job.room_id)?.n || 0;
+          const read = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', job.room_id, actor.role === 'client' ? `client:${job.room_id}` : actor.id)?.seq || 0;
+          if (read >= latest) { run('DELETE FROM push_jobs WHERE id=?', job.id); return; }
+        }
         try {
           await sendPush(JSON.parse(job.subscription), JSON.parse(job.payload));
           run('DELETE FROM push_jobs WHERE id=?', job.id);
@@ -309,6 +323,18 @@ export function createApp(options = {}) {
           run('UPDATE users SET password=? WHERE id=?', passwordHash(data.password), actor.id);
           run('DELETE FROM sessions WHERE user_id=?', actor.id); session(res, actor.id, null);
         }); emit(null); return reply(200, { ok: true });
+      }
+      if (path === '/api/activity' && method === 'POST') {
+        const data = await jsonBody(req);
+        ensure(typeof data.roomId === 'string' && typeof data.tabId === 'string' && /^[\w-]{10,100}$/.test(data.tabId) && typeof data.active === 'boolean' && typeof data.typing === 'boolean', 400, 'Invalid chat activity.');
+        const room = roomAccess(actor, data.roomId); limited(`activity:${actor.sessionHash}`, 120, 60000);
+        const key = `${actor.sessionHash}:${data.tabId}`, previous = activity.get(key);
+        for (const [key, entry] of activity) if (entry.expiresAt <= clock() || !principal(entry.sessionHash)) activity.delete(key);
+        if (data.active) activity.set(key, { sessionHash: actor.sessionHash, roomId: room.id, expiresAt: clock() + 30000, typingUntil: data.typing && room.status === 'open' ? clock() + 6000 : 0 });
+        else activity.delete(key);
+        if (previous?.roomId && previous.roomId !== room.id && previous.typingUntil > clock()) emitTyping(actor, previous.roomId);
+        if (data.typing || previous?.typingUntil > clock()) emitTyping(actor, room.id);
+        return reply(200, { ok: true });
       }
       if (path === '/api/events' && method === 'GET') {
         ensure([...streams].filter(s => s.tokenHash === actor.sessionHash).length < 6, 429, 'Too many open chat tabs.');

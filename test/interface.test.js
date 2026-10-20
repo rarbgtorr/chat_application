@@ -23,7 +23,7 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null, messageG
   const errors = []; window.addEventListener('error', event => errors.push(event.error?.message || event.message));
   window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   window.HTMLDialogElement.prototype.close = function () { this.open = false; };
-  window.EventSource = class { addEventListener() {} close() {} };
+  window.EventSource = class { constructor() { this.listeners = {}; window.testEventStream = this; } addEventListener(name, handler) { this.listeners[name] = handler; } close() {} };
   window.confirm = () => true;
   let objectUrl = 0; window.URL.createObjectURL = () => `blob:test-${++objectUrl}`; window.URL.revokeObjectURL = () => {};
   let uploadedFile = null;
@@ -79,7 +79,7 @@ test('client access secret is exchanged once and removed from the visible URL', 
   assert.equal(f.calls.filter(call => call.path === '/api/client/session').length, 1);
   assert.equal(f.calls[0].data.key, 'private-secret');
   assert.match(f.document.querySelector('.chat-title').textContent, /Wingfactor Support/);
-  assert.equal(f.document.querySelector('.chat-title p'), null);
+  assert.equal(f.document.querySelector('.chat-title p:not(#typing-indicator)'), null);
   assert.match(f.document.querySelector('.composer-footer').textContent, /Securely connected/);
   for (const removed of ['Your private support conversation', 'Private support room', 'Messages stay until your admin deletes them']) assert.equal(f.document.body.textContent.includes(removed), false);
   assert.equal(f.document.querySelector('.inbox'), null);
@@ -353,6 +353,41 @@ test('incoming text and image messages do not play the call ringtone', async t =
   assert.equal(f.document.querySelectorAll('.message').length, 3);
   assert.ok(f.document.querySelector('.message img'));
   assert.equal(rings, 0);
+});
+
+test('typing activity sends only flags and clears on pause, send and hidden chat', async t => {
+  const f = await ui(t); let now = Date.now(); f.window.Date.now = () => now;
+  const input = f.document.querySelector('#message-input');
+  input.value = 'PRIVATE DRAFT'; input.dispatchEvent(new f.window.Event('input', { bubbles: true }));
+  await until(() => f.calls.some(call => call.path === '/api/activity' && call.data.typing));
+  const activity = f.calls.filter(call => call.path === '/api/activity').at(-1).data;
+  assert.deepEqual(Object.keys(activity).sort(), ['active', 'roomId', 'tabId', 'typing']);
+  assert.equal(JSON.stringify(activity).includes('PRIVATE DRAFT'), false);
+  now += 4000; f.window.reportActivity();
+  await until(() => f.calls.filter(call => call.path === '/api/activity').at(-1).data.typing === false);
+  input.dispatchEvent(new f.window.Event('input', { bubbles: true }));
+  f.document.querySelector('#message-form').dispatchEvent(new f.window.Event('submit', { bubbles: true, cancelable: true }));
+  await until(() => f.calls.filter(call => call.path === '/api/activity').at(-1).data.typing === false);
+  Object.defineProperty(f.document, 'hidden', { configurable: true, value: true });
+  f.document.dispatchEvent(new f.window.Event('visibilitychange'));
+  await until(() => f.calls.filter(call => call.path === '/api/activity').at(-1).data.active === false);
+});
+
+test('typing indicators show only other participants in the visible current conversation and expire', async t => {
+  for (const role of ['client', 'agent', 'admin']) {
+    const f = await ui(t, { role }); let now = Date.now(); f.window.Date.now = () => now;
+    const emit = payload => f.window.testEventStream.listeners.typing({ data: JSON.stringify(payload) });
+    const indicator = f.document.querySelector('#typing-indicator');
+    emit({ roomId: 'room123', subject: role === 'client' ? 'room123' : 'agent123', role, typing: true, ttl: 6000 });
+    assert.ok(indicator.classList.contains('hidden'));
+    const payload = { roomId: 'room123', subject: role === 'client' ? 'staff-other' : 'room123', role: role === 'client' ? 'agent' : 'client', typing: true, ttl: 6000 };
+    emit(payload); assert.equal(indicator.classList.contains('hidden'), false); assert.match(indicator.textContent, /typing/);
+    emit({ ...payload, typing: false, ttl: 0 }); assert.ok(indicator.classList.contains('hidden'));
+    emit({ ...payload, roomId: 'other-room' }); assert.ok(indicator.classList.contains('hidden'));
+    emit(payload); now += 6001; f.window.renderTyping(); assert.ok(indicator.classList.contains('hidden'));
+    emit(payload); Object.defineProperty(f.document, 'hidden', { configurable: true, value: true }); f.window.renderTyping();
+    assert.ok(indicator.classList.contains('hidden'));
+  }
 });
 
 test('administrator can reach private room settings and assignment controls', async t => {

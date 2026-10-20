@@ -8,11 +8,14 @@ import { id, passwordHash, hash } from '../server/store.js';
 
 const origin = 'http://localhost:3000';
 const password = 'test-password-long-enough';
-async function fixture(t) {
+async function fixture(t, { retryFirstAgentPush = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'wingfactor-test-'));
-  let now = 1800000000000; const deliveries = [];
+  let now = 1800000000000; const deliveries = []; let retried = false;
   const app = createApp({ directory, origin, clock: () => now, startWorker: false,
-    sendPush: async (subscription, payload) => deliveries.push({ subscription, payload }) });
+    sendPush: async (subscription, payload) => {
+      if (retryFirstAgentPush && !retried && subscription.endpoint.endsWith('test-agent')) { retried = true; throw new Error('Temporary push failure'); }
+      deliveries.push({ subscription, payload });
+    } });
   const { run } = app.store;
   const admin = id(), agent = id(), other = id();
   for (const [userId, username, name, role] of [[admin, 'owner', 'Owner', 'admin'], [agent, 'teammate', 'Teammate', 'agent'], [other, 'unassigned', 'Other', 'agent']]) {
@@ -294,5 +297,48 @@ test('realtime stream carries only room IDs and reconnect signals', async t => {
   const update = new TextDecoder().decode((await reader.read()).value);
   assert.match(update, /event: change/); assert.match(update, new RegExp(room.roomId));
   assert.equal(update.includes('PRIVATE MESSAGE BODY'), false); assert.equal(update.includes('SECRET CLIENT NAME'), false);
+  abort.abort();
+});
+
+test('visible read chat suppresses pushes only on that session; leaving, expiry and unread messages restore them', async t => {
+  const f = await fixture(t, { retryFirstAgentPush: true }), room = await f.room();
+  await f.subscribe('agent');
+  await f.request('agent2', '/api/login', { method: 'POST', body: { username: 'teammate', password } });
+  await f.subscribe('agent2');
+  const update = (tabId, active) => f.request('agent', '/api/activity', { method: 'POST', body: { roomId: room.roomId, tabId, active, typing: false } });
+  await update('visible-tab-one', true); await update('visible-tab-two', true); await update('visible-tab-one', false);
+  const first = await f.message('client', room.roomId, 'Read in the open chat');
+  await f.request('agent', `/api/rooms/${room.roomId}/read`, { method: 'POST', body: { seq: first.data.seq } });
+  f.advance(3000);
+  await f.app.tick();
+  assert.equal(f.deliveries.some(item => item.subscription.endpoint.endsWith('test-agent')), false);
+  assert.equal(f.deliveries.some(item => item.subscription.endpoint.endsWith('test-agent2')), true);
+  assert.equal(f.app.store.all('SELECT * FROM push_jobs').length, 0);
+  f.deliveries.length = 0;
+  await update('visible-tab-two', false);
+  await f.message('client', room.roomId, 'The chat is closed'); await f.app.tick();
+  assert.equal(f.deliveries.length, 2);
+  f.deliveries.length = 0; await update('visible-tab-one', true);
+  await f.message('client', room.roomId, 'An unacknowledged message still needs push'); await f.app.tick();
+  assert.equal(f.deliveries.length, 2);
+  f.deliveries.length = 0; f.advance(31000);
+  const expired = await f.message('client', room.roomId, 'Visibility lease expired');
+  await f.request('agent', `/api/rooms/${room.roomId}/read`, { method: 'POST', body: { seq: expired.data.seq } });
+  await f.app.tick(); assert.equal(f.deliveries.length, 2);
+});
+
+test('typing events are authorized, contain no drafts or contacts, and stop when activity ends', async t => {
+  const f = await fixture(t), room = await f.room(); const abort = new AbortController(); t.after(() => abort.abort());
+  const response = await fetch(f.base + '/api/events', { headers: { Cookie: f.jar.agent }, signal: abort.signal });
+  const reader = response.body.getReader(); await reader.read();
+  const activity = { roomId: room.roomId, tabId: 'typing-test-tab', active: true, typing: true };
+  assert.equal((await f.request('other', '/api/activity', { method: 'POST', body: activity })).status, 404);
+  assert.equal((await f.request('client', '/api/activity', { method: 'POST', body: activity })).status, 200);
+  const update = new TextDecoder().decode((await reader.read()).value);
+  assert.match(update, /event: typing/); assert.match(update, /"typing":true/);
+  assert.equal(update.includes('SECRET CLIENT NAME'), false); assert.equal(update.includes('9876543210'), false); assert.equal(update.includes('wf_session'), false);
+  await f.request('client', '/api/activity', { method: 'POST', body: { ...activity, active: false, typing: false } });
+  const stopped = new TextDecoder().decode((await reader.read()).value);
+  assert.match(stopped, /"typing":false/); assert.match(stopped, /"ttl":0/);
   abort.abort();
 });

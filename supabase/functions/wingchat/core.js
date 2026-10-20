@@ -58,7 +58,7 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
   if(items.length){const {error}=await db.storage.from(bucket).remove(items.map(x=>x.id));if(!error)await result(table('deletions').delete().in('id',items.map(x=>x.id)));}
  }
  async function worker(config){
-  await rpc('schedule');await rpc('calls_sweep');await cleanup();
+  await rpc('schedule');await rpc('calls_sweep');await cleanup();await result(table('activity').delete().lt('expires_at',clock()));
   const jobs=await rpc('claim_jobs');
   await Promise.all((jobs||[]).map(async job=>{
    // Re-read after leasing: a reply or revocation may have cancelled the job meanwhile.
@@ -66,6 +66,15 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
    if(job.kind==='call'){const call=await one('calls','id',job.cycle_id);if(!call||call.status!=='ringing'||call.expires_at<=clock()){await remove('push_jobs','id',job.id);return;}}
    const sub=await one('subscriptions','endpoint',job.endpoint);const a=sub&&await actor(sub.session_hash);
    if(!a||(job.room_id&&!await rpc('allowed',{p_token:a.sessionHash,p_room:job.room_id}))){await remove('push_jobs','id',job.id);return;}
+   if(['message','reply'].includes(job.kind)){
+    const visible=await result(table('activity').select('tab_id').eq('session_hash',a.sessionHash).eq('room_id',job.room_id).gt('expires_at',clock()).limit(1));
+    if(visible.length){
+     let latest=table('messages').select('seq').eq('room_id',job.room_id).is('deleted_at',null);
+     latest=a.role==='client'?latest.in('sender_role',['admin','agent']):latest.eq('sender_role','client');
+     const [messages,reads]=await Promise.all([result(latest.order('seq',{ascending:false}).limit(1)),result(table('reads').select('seq').eq('room_id',job.room_id).eq('subject',a.role==='client'?'client:'+job.room_id:a.id))]);
+     if((reads[0]?.seq||0)>=(messages[0]?.seq||0)){await remove('push_jobs','id',job.id);return;}
+    }
+   }
    try{await webpush.sendNotification(sub.subscription,JSON.stringify(job.payload),{vapidDetails:{subject:config.contact,publicKey:config.vapid.publicKey,privateKey:config.vapid.privateKey},urgency:'high',TTL:job.kind==='call'?Math.max(1,Math.ceil((job.expires_at-clock())/1000)):300,timeout:10000});await remove('push_jobs','id',job.id);}
    catch(e){if([404,410].includes(e.statusCode))await remove('subscriptions','endpoint',job.endpoint);else await patch('push_jobs','id',job.id,{attempts:job.attempts+1,leased_until:0,next_at:clock()+Math.min(300000,1000*2**Math.min(8,job.attempts+1))});}
   }));
@@ -113,6 +122,10 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
     const d=await json(req);check(typeof d.key==='string'&&d.key.length<=100,401,'Invalid support link.');await limit('client:'+hash(d.key),30,600000);const k=await one('keys','key_hash',hash(d.key));check(k,401,'This link is invalid or revoked.');await session(null,k.room_id);return reply({roomId:k.room_id});
    }
    const a=cookieToken&&await actor(hash(cookieToken));check(a,401,'Please sign in or open your private support link.');sessionCookie(cookieToken);
+   if(path==='/activity'&&method==='POST'){
+    const d=await json(req);check(typeof d.roomId==='string'&&typeof d.tabId==='string'&&/^[\w-]{10,100}$/.test(d.tabId)&&typeof d.active==='boolean'&&typeof d.typing==='boolean',400,'Invalid chat activity.');
+    await limit('activity:'+a.sessionHash,120);await rpc('activity_set',{p_token:a.sessionHash,p_tab:d.tabId,p_room:d.roomId,p_active:d.active,p_typing:d.active&&d.typing});return reply({ok:true});
+   }
    if(path==='/me')return reply({user:{id:a.id,role:a.role,name:a.name,roomId:a.roomId},push:{enabled:true,publicKey:config.vapid.publicKey,devices:(await result(table('subscriptions').select('endpoint').eq('session_hash',a.sessionHash))).length},calls:{iceServers:config.iceServers||[{urls:'stun:stun.cloudflare.com:3478'}],iceTransportPolicy:config.iceTransportPolicy||'all'},realtime:{url:supabaseUrl,key:config.publishableKey,topic:a.liveKey}});
    if(path==='/calls'&&method==='GET')return reply(await rpc('call_api',{p_token:a.sessionHash,p_action:'list'}));
    if(path==='/calls'&&method==='POST'){
