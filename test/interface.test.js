@@ -246,6 +246,39 @@ test('text messages appear immediately without putting the composer into a sendi
   finishSend(); await until(() => f.document.querySelector('.message:not(.pending-message)'));
 });
 
+test('sending from older history immediately reveals the latest text, photo and voice note for every role', async t => {
+  for (const role of ['client', 'agent', 'admin']) {
+    let finishSend; const messageGate = new Promise(resolve => { finishSend = resolve; });
+    const f = await ui(t, { role, messageGate });
+    const container = f.document.querySelector('#messages');
+    let height = 2400;
+    Object.defineProperty(container, 'scrollHeight', { get: () => height });
+    Object.defineProperty(container, 'clientHeight', { value: 500 });
+    container.scrollTop = 150;
+    f.document.querySelector('#message-input').value = 'Reply while reading an older message';
+    f.document.querySelector('#message-form').requestSubmit();
+    assert.equal(container.scrollTop, height, `${role}: text should be visible before the server responds`);
+    container.scrollTop = 100; finishSend();
+    await until(() => f.document.querySelector('.message:not(.pending-message)'));
+    assert.equal(container.scrollTop, 100, 'The response must respect scrolling after Send');
+
+    f.window.previewFile(new f.window.File(['image'], 'photo.jpg', { type: 'image/jpeg' }), true);
+    assert.equal(container.scrollTop, height, `${role}: captured photo should be visible immediately`);
+    const photo = container.querySelector('.pending-message img');
+    height = 2800; photo.dispatchEvent(new f.window.Event('load'));
+    assert.equal(container.scrollTop, height, 'The photo stays visible when its dimensions arrive');
+    f.document.querySelector('#message-form').requestSubmit();
+    await until(() => f.document.querySelectorAll('.message:not(.pending-message)').length === 2);
+
+    container.scrollTop = 200;
+    f.window.previewFile(new f.window.File(['audio'], 'voice-note.webm', { type: 'audio/webm' }));
+    assert.equal(container.scrollTop, 200, 'Preparing a file does not count as sending it');
+    f.document.querySelector('#message-form').requestSubmit();
+    assert.equal(container.scrollTop, height, `${role}: sent voice note should be visible immediately`);
+    await until(() => f.document.querySelectorAll('.message:not(.pending-message)').length === 3);
+  }
+});
+
 test('Send keeps the composer focused for all roles and respects later manual dismissal', async t => {
   for (const role of ['client', 'agent', 'admin']) {
     let finishSend; const messageGate = new Promise(resolve => { finishSend = resolve; });

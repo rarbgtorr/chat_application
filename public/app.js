@@ -190,7 +190,23 @@ function syncComposer() {
   input.style.height = `${Math.max(48, Math.min(144, input.scrollHeight))}px`;
   input.style.overflowY = input.scrollHeight > 144 ? 'auto' : 'hidden';
 }
-function renderMessages(prepend = false) {
+function followLatestMessage(container) {
+  let expectedTop;
+  const follow = () => {
+    // Stop following if the reader scrolls away or opens another conversation.
+    if (!container.isConnected || $('#messages') !== container || (expectedTop !== undefined && container.scrollTop !== expectedTop)) return;
+    container.scrollTop = container.scrollHeight; expectedTop = container.scrollTop;
+  };
+  follow(); requestAnimationFrame(follow);
+  // Photos and videos can add height after the message first appears.
+  for (const media of container.querySelectorAll('img,video')) {
+    if (media.tagName === 'IMG' ? media.complete : media.readyState > 0) continue;
+    media.addEventListener(media.tagName === 'IMG' ? 'load' : 'loadedmetadata', () => {
+      if (media.isConnected && container.contains(media)) follow();
+    }, { once: true });
+  }
+}
+function renderMessages(prepend = false, scrollToLatest = false) {
   const container = $('#messages'); if (!container) return;
   const oldHeight = container.scrollHeight; const scrollTop = container.scrollTop;
   const atBottom = oldHeight - scrollTop - container.clientHeight < 120;
@@ -251,7 +267,7 @@ function renderMessages(prepend = false) {
   [...container.children].filter(node => !keep.has(node)).forEach(node => node.remove());
   if (state.selectedMessageId) syncMessageSelection();
   if (prepend) container.scrollTop = scrollTop + container.scrollHeight - oldHeight;
-  else if (atBottom || !oldHeight) container.scrollTop = container.scrollHeight;
+  else if (scrollToLatest || atBottom || !oldHeight) followLatestMessage(container);
 }
 function connection(connected) {
   state.connected = connected;
@@ -460,13 +476,13 @@ function previewFile(file, sendImmediately = false) {
     const pending = { id: `pending-${crypto.randomUUID()}`, roomId: state.roomId, created_at: Date.now(), own: true,
       sender: state.me.name, sender_role: state.me.role, body: '', filename: file.name, mime: file.type, size: file.size,
       localUrl: URL.createObjectURL(file), file, nonce: crypto.randomUUID(), pending: true, failed: false, serverId: null };
-    state.pendingMessages.push(pending); form.dataset.pendingId = pending.id; renderMessages();
+    state.pendingMessages.push(pending); form.dataset.pendingId = pending.id; renderMessages(false, true);
   }
   syncComposer(); return true;
 }
 async function sendPendingMessage(pending) {
   if (!pending || pending.sending || pending.serverId) return;
-  pending.sending = true; pending.failed = false; renderMessages();
+  pending.sending = true; pending.failed = false; renderMessages(false, state.roomId === pending.roomId);
   try {
     if (pending.file && !pending.attachmentId) {
       const uploaded = await api(`/api/rooms/${pending.roomId}/upload`, { method: 'POST', body: pending.file,
@@ -549,7 +565,7 @@ document.addEventListener('submit', async event => {
         pending.body = value; pending.file ||= file; pending.nonce ||= crypto.randomUUID();
       }
       input.value = ''; stopTyping(); state.file = null; $('#file-preview').classList.add('hidden'); syncComposer();
-      delete form.dataset.pendingId; renderMessages();
+      delete form.dataset.pendingId; renderMessages(false, true);
       void sendPendingMessage(pending); return;
     }
   } catch (error) {
