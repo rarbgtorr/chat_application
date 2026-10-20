@@ -92,7 +92,7 @@ test('messages are bidirectional, idempotent, and safely retain raw text for esc
   assert.equal(f.app.store.get('SELECT * FROM cycles WHERE room_id=?', room.roomId), undefined);
 });
 
-test('client receipts progress from sent to delivered to read for the assigned teammate', async t => {
+test('receipts progress in both directions between the client and assigned teammate', async t => {
   const f = await fixture(t), room = await f.room();
   const message = await f.message('client', room.roomId, 'Please check this.');
   let history = (await f.request('client', `/api/rooms/${room.roomId}/messages`)).data.messages;
@@ -106,6 +106,16 @@ test('client receipts progress from sent to delivered to read for the assigned t
   await f.request('agent', `/api/rooms/${room.roomId}/read`, { method: 'POST', body: { seq: message.data.seq } });
   history = (await f.request('client', `/api/rooms/${room.roomId}/messages`)).data.messages;
   assert.equal(history[0].delivery, 'read');
+
+  const reply = await f.message('agent', room.roomId, 'I am checking it now.');
+  let agentHistory = (await f.request('agent', `/api/rooms/${room.roomId}/messages`)).data.messages;
+  assert.equal(agentHistory.at(-1).delivery, 'sent');
+  assert.equal((await f.request('client', '/api/delivered', { method: 'POST', body: { roomIds: [room.roomId] } })).status, 200);
+  agentHistory = (await f.request('agent', `/api/rooms/${room.roomId}/messages`)).data.messages;
+  assert.equal(agentHistory.at(-1).delivery, 'delivered');
+  await f.request('client', `/api/rooms/${room.roomId}/read`, { method: 'POST', body: { seq: reply.data.seq } });
+  agentHistory = (await f.request('agent', `/api/rooms/${room.roomId}/messages`)).data.messages;
+  assert.equal(agentHistory.at(-1).delivery, 'read');
 });
 
 test('attachments reach teammates directly, support ranges, and remain private to their room', async t => {
@@ -125,6 +135,25 @@ test('attachments reach teammates directly, support ranges, and remain private t
     body: Buffer.from('<script/>'), headers: { 'X-Filename': 'bad.html' } })).status, 415);
   // An attachment uploaded by another principal cannot be attached as your own message.
   assert.equal((await f.request('agent', `/api/rooms/${room.roomId}/messages`, { method: 'POST', body: { attachmentId, nonce: id() } })).status, 400);
+});
+
+test('senders delete their own messages for everyone and administrators can delete any message', async t => {
+  const f = await fixture(t), room = await f.room();
+  const clientMessage = await f.message('client', room.roomId, 'Client-owned message');
+  const agentMessage = await f.message('agent', room.roomId, 'Teammate-owned message');
+  assert.equal((await f.request('agent', `/api/rooms/${room.roomId}/messages/${clientMessage.data.id}`, { method: 'DELETE' })).status, 403);
+  assert.equal((await f.request('client', `/api/rooms/${room.roomId}/messages/${agentMessage.data.id}`, { method: 'DELETE' })).status, 403);
+  assert.equal((await f.request('client', `/api/rooms/${room.roomId}/messages/${clientMessage.data.id}`, { method: 'DELETE' })).status, 200);
+  assert.equal((await f.request('admin', `/api/rooms/${room.roomId}/messages/${agentMessage.data.id}`, { method: 'DELETE' })).status, 200);
+
+  const upload = await f.request('agent', `/api/rooms/${room.roomId}/upload`, { method: 'POST',
+    body: Buffer.from('delete this image'), headers: { 'X-Filename': 'photo-1800000000000.jpg', 'Content-Type': 'image/jpeg' } });
+  const mediaMessage = await f.request('agent', `/api/rooms/${room.roomId}/messages`, { method: 'POST', body: { attachmentId: upload.data.attachmentId, nonce: id() } });
+  assert.equal(mediaMessage.status, 201);
+  assert.equal((await f.request('agent', `/api/rooms/${room.roomId}/messages/${mediaMessage.data.id}`, { method: 'DELETE' })).status, 200);
+  assert.equal((await f.request('agent', `/api/media/${upload.data.attachmentId}`)).status, 404);
+  assert.equal(f.app.store.get('SELECT id FROM attachments WHERE id=?', upload.data.attachmentId), undefined);
+  assert.equal((await f.request('client', `/api/rooms/${room.roomId}/messages`)).data.messages.length, 0);
 });
 
 test('5-minute reminder and 10-minute admin escalation use the first unanswered message', async t => {
@@ -193,7 +222,7 @@ test('sessions do not idle-expire and logout removes that device push access', a
   assert.equal(f.app.store.all('SELECT * FROM subscriptions').length, 0);
 });
 
-test('closing keeps history and stops escalation; only admin deletion removes media and records', async t => {
+test('closing keeps history and stops escalation; room deletion removes media and records', async t => {
   const f = await fixture(t), room = await f.room(); await f.message('client', room.roomId, 'Keep me.');
   const upload = await f.request('agent', `/api/rooms/${room.roomId}/upload`, { method: 'POST',
     body: Buffer.from('persistent file'), headers: { 'X-Filename': 'note.txt' } });

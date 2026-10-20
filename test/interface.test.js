@@ -10,6 +10,7 @@ const styles = await readFile(new URL('../public/style.css', import.meta.url), '
 const serviceWorker = await readFile(new URL('../public/sw.js', import.meta.url), 'utf8');
 const callFix = await readFile(new URL('../supabase/migrations/20261019141500_fix_call_finish_ambiguity.sql', import.meta.url), 'utf8');
 const receiptMigration = await readFile(new URL('../supabase/migrations/20261019145343_whatsapp_receipts_and_assigned_call_ringing.sql', import.meta.url), 'utf8');
+const deleteMigration = await readFile(new URL('../supabase/migrations/20261020092500_message_delete_for_everyone.sql', import.meta.url), 'utf8');
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
@@ -37,9 +38,12 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null } = {}) {
       uploadedFile = options.body; if (uploadGate) await uploadGate; result = { attachmentId: 'attachment123' };
     } else if (path.endsWith('/messages') && options.method === 'POST') {
       const m = { id: `m${messages.length}`, seq: messages.length + 1, body: data.body, sender: 'Wingfactor Support', own: true, sender_role: role, created_at: Date.now(),
-        ...(role === 'client' ? { delivery: 'sent' } : {}),
+        delivery: 'sent',
         ...(data.attachmentId ? { attachment_id: data.attachmentId, filename: uploadedFile.name, mime: uploadedFile.type, size: uploadedFile.size } : {}) };
       messages.push(m); result = { id: m.id, seq: m.seq };
+    } else if (/\/messages\/[\w-]+$/.test(path) && options.method === 'DELETE') {
+      const id = path.split('/').at(-1); const index = messages.findIndex(message => message.id === id);
+      if (index >= 0) messages.splice(index, 1); result = { ok: true };
     } else if (path.includes('/messages')) result = { messages: [...messages], hasMore: false };
     else if (path === '/api/client/session') result = { roomId };
     else if (path === '/api/alerts') result = [];
@@ -100,7 +104,7 @@ test('captured photo appears immediately while its upload continues', async t =>
   await until(() => f.document.querySelector('.message:not(.pending-message) img'));
   assert.equal(f.document.querySelector('.pending-message'), null);
   assert.match(f.document.querySelector('.message img').src, /\/api\/media\/attachment123$/);
-  assert.equal(f.document.querySelector('.message .attachment a').textContent, '');
+  assert.ok(f.document.querySelector('.message .image-open'));
 });
 
 test('call cleanup avoids ambiguous notification columns and secure status is aligned', () => {
@@ -110,6 +114,7 @@ test('call cleanup avoids ambiguous notification columns and secure status is al
   assert.doesNotMatch(callFix, /declare[^;]*\bkind text/);
   assert.match(styles, /\.composer-footer>span\{display:inline-flex;align-items:center;gap:5px/);
   assert.match(serviceWorker, /requireInteraction: call/);
+  assert.match(serviceWorker, /\['message', 'reply'\]\.includes\(payload\.kind\)/);
   assert.match(receiptMigration, /role_name='agent' or not exists/);
 });
 
@@ -125,7 +130,7 @@ test('sending through the composer renders text safely and clears the sent draft
   assert.ok(send.data.nonce); assert.equal(send.data.body, '<img src=x onerror=alert(1)> Hello');
 });
 
-test('client text messages show one sent tick, two delivered ticks, and blue read ticks', async t => {
+test('client, teammate, and admin outgoing messages show WhatsApp delivery ticks', async t => {
   const f = await ui(t, { role: 'client' });
   const message = { id: 'receipt-message', seq: 1, body: 'Are you there?', sender: 'Client', sender_role: 'client', own: true, created_at: Date.now(), delivery: 'sent' };
   f.messages.push(message); await f.window.refresh();
@@ -135,6 +140,47 @@ test('client text messages show one sent tick, two delivered ticks, and blue rea
   f.messages[0] = { ...message, delivery: 'read' }; await f.window.refresh();
   assert.equal(f.document.querySelector('.delivery-mark.read svg').querySelectorAll('path').length, 2);
   assert.match(styles, /\.delivery-mark\.read\{color:#53bdeb/);
+
+  for (const role of ['agent', 'admin']) {
+    const staff = await ui(t, { role });
+    staff.messages.push({ id: `${role}-receipt`, seq: 1, body: 'Reply sent', sender: 'Wingfactor Support', sender_role: role, own: true, created_at: Date.now(), delivery: 'read' });
+    await staff.window.refresh();
+    assert.ok(staff.document.querySelector('.delivery-mark.read'));
+    assert.equal(staff.document.querySelector('.delivery-mark.read svg').querySelectorAll('path').length, 2);
+  }
+});
+
+test('message deletion controls follow sender ownership and admin permissions', async t => {
+  const client = await ui(t, { role: 'client' });
+  client.messages.push(
+    { id: 'client-own', seq: 1, body: 'Mine', sender: 'Client', sender_role: 'client', own: true, created_at: Date.now(), delivery: 'sent' },
+    { id: 'staff-other', seq: 2, body: 'Staff', sender: 'Wingfactor Support', sender_role: 'agent', own: false, created_at: Date.now() },
+  );
+  await client.window.refresh();
+  assert.ok(client.document.querySelector('[data-delete-message="client-own"]'));
+  assert.equal(client.document.querySelector('[data-delete-message="staff-other"]'), null);
+  client.document.querySelector('[data-delete-message="client-own"]').click();
+  await until(() => !client.messages.some(message => message.id === 'client-own') && !client.document.querySelector('[data-delete-message="client-own"]'));
+  assert.equal(client.document.querySelector('[data-delete-message="client-own"]'), null);
+
+  const admin = await ui(t, { role: 'admin' });
+  admin.messages.push({ id: 'client-message', seq: 1, body: 'Client', sender: 'Visible Client', sender_role: 'client', own: false, created_at: Date.now() });
+  await admin.window.refresh();
+  assert.ok(admin.document.querySelector('[data-delete-message="client-message"]'));
+  assert.match(deleteMigration, /role_name<>'admin' and m\.sender_id<>who/);
+  assert.match(deleteMigration, /revoke all on function public\.wc_message_delete/);
+});
+
+test('opening a client camera photo gives staff a full preview and starts a device download', async t => {
+  const f = await ui(t, { role: 'agent' }); const downloads = [];
+  f.window.HTMLAnchorElement.prototype.click = function () { downloads.push(this.href); };
+  f.messages.push({ id: 'camera-photo', seq: 1, body: '', sender: 'Visible Client', sender_role: 'client', own: false, created_at: Date.now(),
+    attachment_id: 'camera-file', filename: 'photo-1800000000000.jpg', mime: 'image/jpeg', size: 1000 });
+  await f.window.refresh();
+  f.document.querySelector('[data-open-image="camera-photo"]').click();
+  await until(() => f.document.querySelector('.image-viewer img'));
+  assert.match(f.document.querySelector('.image-viewer img').src, /\/api\/media\/camera-file$/);
+  assert.equal(downloads.length, 1); assert.match(downloads[0], /\/api\/media\/camera-file\?download=1$/);
 });
 
 test('live updates preserve existing media DOM elements and unsent drafts', async t => {

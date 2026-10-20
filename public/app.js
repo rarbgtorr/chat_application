@@ -18,6 +18,7 @@ const icons = {
   back: '<path d="m14 6-6 6 6 6"/>', close: '<path d="m6 6 12 12M18 6 6 18"/>',
   lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V6a4 4 0 0 1 8 0v4"/>',
   file: '<path d="M14 2H5v20h14V7l-5-5ZM14 2v6h5M8 13h8M8 17h5"/>',
+  trash: '<path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
 };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.chat}</svg>`;
@@ -52,6 +53,17 @@ const clientNotes = room => room?.private?.notes ?? room?.client?.notes ?? '';
 function modal(title, content) { state.media?.closeCamera(); $('#modal').classList.remove('camera-dialog'); $('#modal-body').innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2>${iconButton('close', 'close-modal', 'Close')}</div>${content}`; if (!$('#modal').open) $('#modal').showModal(); }
 function dismiss() { $('#modal').close(); }
 function initials(name) { return esc(name.split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase()); }
+function cameraPhoto(message) { return message.sender_role === 'client' && /^photo-\d+\.jpe?g$/i.test(message.filename || ''); }
+function openMessageImage(messageId) {
+  const message = state.messages.find(item => item.id === messageId);
+  if (!message?.attachment_id || message.attachment_expired || !message.mime?.startsWith('image/')) return;
+  const src = `/api/media/${message.attachment_id}`;
+  modal(message.filename || 'Photo', `<div class="image-viewer"><img src="${src}" alt="${esc(message.filename || 'Photo')}"></div><div class="modal-actions"><a class="secondary" href="${src}?download=1" download="${esc(message.filename || 'photo')}">${icon('file')} Download</a></div>`);
+  if (state.me.role !== 'client' && cameraPhoto(message)) {
+    const download = document.createElement('a'); download.href = `${src}?download=1`; download.download = message.filename;
+    download.hidden = true; document.body.append(download); download.click(); download.remove();
+  }
+}
 
 function auth(error = '') {
   state.stream?.close(); state.media?.close(); state.media=null; state.me = null;
@@ -116,16 +128,18 @@ function renderMessages(prepend = false) {
     } else if (message.attachment_id) {
       const src = `/api/media/${message.attachment_id}`;
       const image = message.mime?.startsWith('image/');
-      const preview = image ? `<a href="${src}" target="_blank" rel="noopener"><img src="${src}" alt="${esc(message.filename)}" loading="lazy"></a>` : message.mime?.startsWith('video/') ? `<video src="${src}" controls preload="metadata"></video>` : message.mime?.startsWith('audio/') ? `<audio src="${src}" controls preload="metadata"></audio>` : '';
+      const preview = image ? `<button type="button" class="image-open" data-open-image="${message.id}" aria-label="Open ${esc(message.filename || 'photo')}"><img src="${src}" alt="${esc(message.filename)}" loading="lazy"></button>` : message.mime?.startsWith('video/') ? `<video src="${src}" controls preload="metadata"></video>` : message.mime?.startsWith('audio/') ? `<audio src="${src}" controls preload="metadata"></audio>` : '';
       attachment = image ? `<div class="attachment image-attachment">${preview}</div>` : `<div class="attachment">${preview}<a href="${src}?download=1" download>${icon('file')} ${esc(message.filename)}</a><small>${(message.size / 1024 / 1024).toFixed(2)} MB · Download</small></div>`;
     }
-    const receipt = state.me.role === 'client' && message.own && message.sender_role === 'client';
+    const receipt = message.own && message.sender_role !== 'system';
     const delivery = message.pending ? message.failed ? 'failed' : message.serverId ? 'sent' : 'sending' : message.delivery || 'sent';
     const imageMessage = Boolean(message.localUrl || (message.attachment_id && !message.attachment_expired && message.mime?.startsWith('image/')));
     const key = message.pending ? `${message.id}-${delivery}` : `${message.id}-${Boolean(message.attachment_expired)}-${receipt ? delivery : ''}`;
     const meta = message.own ? '' : `<div class="message-meta"><span>${esc(message.sender)}</span><time>${formatTime(message.created_at)}</time></div>`;
     const status = `<span class="message-status"><time>${formatTime(message.created_at)}</time>${receipt ? deliveryMark(delivery, message.failed) : ''}</span>`;
-    return `${divider}<article data-key="${key}" class="message ${message.own ? 'own' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="bubble">${message.body ? `<span class="message-body">${esc(message.body)}</span>` : ''}${attachment}${status}</div></article>`;
+    const canDelete = !message.pending && (message.own || state.me.role === 'admin');
+    const remove = canDelete ? `<button type="button" class="message-delete" data-delete-message="${message.id}" aria-label="Delete for everyone" title="Delete for everyone">${icon('trash')}</button>` : '';
+    return `${divider}<article data-key="${key}" class="message ${message.own ? 'own' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="bubble">${remove}${message.body ? `<span class="message-body">${esc(message.body)}</span>` : ''}${attachment}${status}</div></article>`;
   }).join('');
   const template = document.createElement('template');
   template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(clientName(room))}. Send a message to get started.`}</p></div>`}`;
@@ -160,7 +174,7 @@ async function loadMessages(roomId, before) {
   else {
     // Retain previously loaded pages when realtime refresh fetches the most recent page.
     const first = result.messages[0]?.seq || 0;
-    state.messages = [...state.messages.filter(m => m.seq < first), ...result.messages];
+    state.messages = [...(result.hasMore ? state.messages.filter(m => m.seq < first) : []), ...result.messages];
   }
   if (before || state.messages.length <= 100) state.hasMore = result.hasMore;
   const savedIds = new Set(state.messages.map(message => message.id));
@@ -327,8 +341,9 @@ function previewFile(file, sendImmediately = false) {
   return true;
 }
 async function acknowledgeDeliveries() {
-  if (!state.me || state.me.role === 'client' || !state.rooms.length) return;
-  try { await post('/api/delivered', { roomIds: state.rooms.map(room => room.id).slice(0, 500) }); } catch {}
+  if (!state.me || !state.rooms.length) return;
+  const roomIds = state.me.role === 'client' ? [state.me.roomId] : state.rooms.map(room => room.id).slice(0, 500);
+  try { await post('/api/delivered', { roomIds }); } catch {}
 }
 async function record() {
   if (state.recorder?.state === 'recording') { state.recorder.stop(); return; }
@@ -406,6 +421,13 @@ document.addEventListener('click', async event => {
     if (state.sound?.state === 'suspended') void state.sound.resume();
     if (button.dataset.room) return await selectRoom(button.dataset.room);
     if (button.dataset.alertRoom) { dismiss(); return await selectRoom(button.dataset.alertRoom); }
+    if (button.dataset.openImage) { openMessageImage(button.dataset.openImage); return; }
+    if (button.dataset.deleteMessage) {
+      if (!confirm('Delete this message for everyone? This cannot be undone.')) return;
+      await api(`/api/rooms/${state.roomId}/messages/${button.dataset.deleteMessage}`, { method: 'DELETE' });
+      state.messages = state.messages.filter(message => message.id !== button.dataset.deleteMessage); renderMessages();
+      await refresh(); toast('Message deleted for everyone.'); return;
+    }
     if (button.dataset.filter) {
       state.filter = button.dataset.filter;
       document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('active', b === button)); renderList(); return;

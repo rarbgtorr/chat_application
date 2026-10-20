@@ -12,7 +12,7 @@ self.addEventListener('push', event => {
     vibrate: call ? [500, 200, 500, 200, 500] : [200, 100, 200],
     data: { url: target.origin === self.location.origin ? target.href : self.location.origin },
   });
-  const delivered = payload.kind === 'message' && payload.roomId
+  const delivered = ['message', 'reply'].includes(payload.kind) && payload.roomId
     ? fetch('/api/delivered', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomIds: [payload.roomId] }) }).catch(() => {})
     : Promise.resolve();
   event.waitUntil(Promise.allSettled([notification, delivered]));

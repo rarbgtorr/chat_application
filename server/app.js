@@ -134,6 +134,11 @@ export function createApp(options = {}) {
     }
     return { delivered: Math.max(delivered, read), read };
   }
+  function clientReceiptState(roomId) {
+    const delivered = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', roomId, `delivered:client:${roomId}`)?.seq || 0;
+    const read = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', roomId, `client:${roomId}`)?.seq || 0;
+    return { delivered: Math.max(delivered, read), read };
+  }
   function newMessage(actor, roomId, data) {
     const room = roomAccess(actor, roomId);
     ensure(room.status === 'open', 409, 'This conversation is closed. Ask the administrator to reopen it.');
@@ -341,11 +346,21 @@ export function createApp(options = {}) {
         }); emit(null); return reply(200, { ok: true });
       }
       if (path === '/api/delivered' && method === 'POST') {
-        ensure(actor.role !== 'client', 403, 'Staff only.'); const data = await jsonBody(req);
+        const data = await jsonBody(req);
         ensure(Array.isArray(data.roomIds) && data.roomIds.length <= 500 && data.roomIds.every(roomId => typeof roomId === 'string' && /^[\w-]{10,100}$/.test(roomId)), 400, 'Invalid conversations.');
         const changed = [];
         transaction(() => {
           for (const roomId of new Set(data.roomIds)) {
+            if (actor.role === 'client') {
+              if (roomId !== actor.roomId) continue;
+              const seq = get("SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND sender_role IN ('admin','agent')", roomId)?.n || 0;
+              const subject = `delivered:client:${roomId}`; const previous = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', roomId, subject)?.seq || 0;
+              if (seq > previous) {
+                run('INSERT INTO read_markers VALUES(?,?,?) ON CONFLICT(room_id,subject) DO UPDATE SET seq=MAX(seq,excluded.seq)', roomId, subject, seq);
+                changed.push(roomId);
+              }
+              continue;
+            }
             const eligible = actor.role === 'agent'
               ? Boolean(get('SELECT 1 FROM assignments WHERE room_id=? AND user_id=?', roomId, actor.id))
               : agentIds(roomId).length === 0;
@@ -379,6 +394,34 @@ export function createApp(options = {}) {
             run('INSERT INTO assignments VALUES(?,?)', roomId, userId);
           }
         }); emit(roomId); return reply(201, { roomId, code, link: `${origin}/c/${roomId}#key=${key}` });
+      }
+      const messageMatch = /^\/api\/rooms\/([\w-]+)\/messages\/([\w-]+)$/.exec(path);
+      if (messageMatch && method === 'DELETE') {
+        const roomId = messageMatch[1], messageId = messageMatch[2]; roomAccess(actor, roomId);
+        const message = get('SELECT * FROM messages WHERE id=? AND room_id=?', messageId, roomId);
+        ensure(message, 404, 'Message not found.');
+        const senderId = actor.role === 'client' ? roomId : actor.id;
+        ensure(actor.role === 'admin' || message.sender_id === senderId, 403, 'You can only delete messages you sent.');
+        transaction(() => {
+          const cycle = get('SELECT * FROM cycles WHERE room_id=?', roomId);
+          if (cycle?.first_message_id === message.id) {
+            run('DELETE FROM push_jobs WHERE room_id=? AND cycle_id=?', roomId, cycle.first_message_id);
+            run('UPDATE alerts SET seen=1 WHERE room_id=? AND cycle_id=?', roomId, cycle.first_message_id);
+            run('DELETE FROM cycles WHERE room_id=?', roomId);
+          }
+          if (message.attachment_id) run('INSERT OR IGNORE INTO file_deletions VALUES(?)', message.attachment_id);
+          run('DELETE FROM messages WHERE id=? AND room_id=?', message.id, roomId);
+          if (message.attachment_id) run('DELETE FROM attachments WHERE id=?', message.attachment_id);
+          if (cycle?.first_message_id === message.id) {
+            const next = get("SELECT id,created_at FROM messages WHERE room_id=? AND sender_role='client' AND seq>? ORDER BY seq LIMIT 1", roomId, message.seq);
+            if (next) run('INSERT INTO cycles(room_id,first_message_id,first_at) VALUES(?,?,?)', roomId, next.id, next.created_at);
+          } else if (!cycle && ['admin', 'agent'].includes(message.sender_role)) {
+            const lastReply = get("SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND sender_role IN ('admin','agent')", roomId)?.n || 0;
+            const pending = get("SELECT id,created_at FROM messages WHERE room_id=? AND sender_role='client' AND seq>? ORDER BY seq LIMIT 1", roomId, lastReply);
+            if (pending && get("SELECT status FROM rooms WHERE id=?", roomId)?.status === 'open') run('INSERT INTO cycles(room_id,first_message_id,first_at) VALUES(?,?,?)', roomId, pending.id, pending.created_at);
+          }
+        });
+        await tick(); emit(roomId); return reply(200, { ok: true });
       }
       const roomMatch = /^\/api\/rooms\/([\w-]+)(?:\/(messages|read|upload|link|revoke))?$/.exec(path);
       if (roomMatch) {
@@ -433,12 +476,12 @@ export function createApp(options = {}) {
             WHERE m.room_id=? AND m.seq<? ORDER BY m.seq DESC LIMIT 100`, roomId, before);
           // The display name is intentional; phone/email contact information is never joined here.
           const clientLabel = actor.role === 'client' ? room.code : get('SELECT name FROM client_private WHERE room_id=?', roomId)?.name || room.code;
-          const receipts = actor.role === 'client' ? receiptState(roomId) : null;
-          return reply(200, { messages: rows.reverse().map(m => ({ ...m,
-            own: m.sender_id === (actor.role === 'client' ? roomId : actor.id),
+          const receipts = actor.role === 'client' ? receiptState(roomId) : clientReceiptState(roomId);
+          return reply(200, { messages: rows.reverse().map(m => { const own = m.sender_id === (actor.role === 'client' ? roomId : actor.id); return ({ ...m,
+            own,
             sender: m.sender_role === 'client' ? clientLabel : 'Wingfactor Support',
-            ...(receipts && m.sender_role === 'client' ? { delivery: m.seq <= receipts.read ? 'read' : m.seq <= receipts.delivered ? 'delivered' : 'sent' } : {}),
-          })), hasMore: rows.length === 100 });
+            ...(own && m.sender_role !== 'system' ? { delivery: m.seq <= receipts.read ? 'read' : m.seq <= receipts.delivered ? 'delivered' : 'sent' } : {}),
+          }); }), hasMore: rows.length === 100 });
         }
         if (action === 'messages' && method === 'POST') {
           limited(`message:${actor.sessionHash}`, 120, 60000);
@@ -451,7 +494,7 @@ export function createApp(options = {}) {
           const seq = Math.max(0, Math.min(latest, Number(data.seq) || 0)); const previous = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', roomId, subject)?.seq || 0;
           run('INSERT INTO read_markers VALUES(?,?,?) ON CONFLICT(room_id,subject) DO UPDATE SET seq=MAX(seq,excluded.seq)', roomId, subject, seq);
           if (actor.role !== 'client') run("UPDATE alerts SET seen=1 WHERE room_id=? AND user_id=? AND kind IN ('message','assigned')", roomId, actor.id);
-          if (actor.role !== 'client' && seq > previous) emit(roomId);
+          if (seq > previous) emit(roomId);
           return reply(200, { ok: true });
         }
         if (action === 'upload' && method === 'POST') {
