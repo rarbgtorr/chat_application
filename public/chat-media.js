@@ -40,7 +40,7 @@ export class IncomingRingtone {
 export function installMedia({api,post,config,room,preview,modal,dismiss,toast,recording,ring}){
   const host=document.createElement('section');host.id='call-panel';host.className='call-panel hidden';host.setAttribute('aria-live','polite');document.body.append(host);
   const audio=document.createElement('audio');audio.autoplay=true;document.body.append(audio);
-  let camera=null,photo=null,photoUrl=null,closed=false,syncing=false,remoteStream=null,localStream=null;
+  let camera=null,photo=null,photoUrl=null,closed=false,syncing=false,syncAgain=false,remoteStream=null,localStream=null;
   const ringtone=new IncomingRingtone({ring});
   const attach=(selector,stream,muted=false)=>{const el=host.querySelector(selector);if(!el)return;el.muted=muted;if(el.srcObject!==stream)el.srcObject=stream;if(stream)void el.play().catch(()=>{});};
   const render=c=>{
@@ -94,15 +94,16 @@ export function installMedia({api,post,config,room,preview,modal,dismiss,toast,r
   document.querySelector('#modal').addEventListener('close',closeCamera);
   document.querySelector('#modal').addEventListener('cancel',closeCamera);
   async function sync(){
-    if(closed||syncing)return;syncing=true;
+    if(closed)return;if(syncing){syncAgain=true;return;}syncing=true;
     try{
       if(voice.ready)await voice.poll();
       const calls=await api('/api/calls');voice.lastGood=Date.now();if(closed)return;
       if(voice.call&&!voice.ready&&!voice.busy&&!calls.some(c=>c.id===voice.call.id)){voice.clean();}
       if(!voice.call){const c=calls.find(c=>c.incoming&&c.status==='ringing');if(c)voice.incoming(c);}
     }catch(e){if(e.status===401||e.status===403){voice.clean();}else if(voice.call&&voice.ready&&Date.now()-(voice.lastGood||Date.now())>45000)await voice.fail(new Error('Call server unreachable. Please reconnect.'));}
-    finally{syncing=false;}
+    finally{syncing=false;if(syncAgain&&!closed){syncAgain=false;void sync();}}
   }
+  void sync();
   const timer=setInterval(()=>{if(voice.call||!document.hidden)void sync();},2000);
   const leave=()=>{ringtone.stop();if(voice.call)void post('/api/calls',{action:voice.ready?'end':'decline',callId:voice.call.id}).catch(()=>{});voice.clean();closeCamera();};
   window.addEventListener('pagehide',leave);

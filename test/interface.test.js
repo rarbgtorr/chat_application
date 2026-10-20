@@ -14,7 +14,7 @@ const deleteMigration = await readFile(new URL('../supabase/migrations/202610200
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
-async function ui(t, { role = 'agent', link = false, uploadGate = null, messageGate = null, pointerEvents = true } = {}) {
+async function ui(t, { role = 'agent', link = false, uploadGate = null, messageGate = null, pointerEvents = true, serviceWorker = false } = {}) {
   const roomId = 'room123'; const calls = []; const messages = [];
   const dom = new JSDOM(html, { url: `http://localhost:3000/${role === 'client' ? `c/${roomId}${link ? '#key=private-secret' : ''}` : '?room=room123'}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
@@ -25,6 +25,10 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null, messageG
   window.HTMLDialogElement.prototype.close = function () { this.open = false; };
   window.EventSource = class { constructor() { this.listeners = {}; window.testEventStream = this; } addEventListener(name, handler) { this.listeners[name] = handler; } close() {} };
   window.confirm = () => true;
+  if (serviceWorker) {
+    const worker = new window.EventTarget(); worker.register = async () => ({ pushManager: { getSubscription: async () => null } });
+    Object.defineProperty(window.navigator, 'serviceWorker', { value: worker });
+  }
   let objectUrl = 0; window.URL.createObjectURL = () => `blob:test-${++objectUrl}`; window.URL.revokeObjectURL = () => {};
   let uploadedFile = null;
   const room = { id: roomId, code: 'Client #ABC123', status: 'open', created_at: Date.now(), unread: 0,
@@ -55,10 +59,10 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null, messageG
     else result = { ok: true };
     return { ok: true, status: 200, json: async () => result };
   };
-  window.eval(script);
+  window.eval(script + '\nwindow.testAppState = state;');
   await until(() => window.document.querySelector('#message-form'));
   t.after(() => { dom.window.close(); assert.deepEqual(errors, [], 'Unexpected UI error'); });
-  return { window, document: window.document, calls, messages, room };
+  return { window, document: window.document, calls, messages, room, appState: window.testAppState };
 }
 
 test('teammate screen uses the admin client name and exposes notes without contact details', async t => {
@@ -353,6 +357,41 @@ test('incoming text and image messages do not play the call ringtone', async t =
   assert.equal(f.document.querySelectorAll('.message').length, 3);
   assert.ok(f.document.querySelector('.message img'));
   assert.equal(rings, 0);
+});
+
+test('incoming call pushes check calls for every role without requiring a visible conversation', async t => {
+  for (const role of ['client', 'agent', 'admin']) {
+    const f = await ui(t, { role, serviceWorker: true }); let synced = 0;
+    f.appState.media = { sync: () => { synced++; } }; f.appState.roomId = null; f.window.renderChat();
+    Object.defineProperty(f.document, 'hidden', { configurable: true, value: true });
+    const emit = data => f.window.navigator.serviceWorker.dispatchEvent(new f.window.MessageEvent('message', { data }));
+    emit({ type: 'chat-message', roomId: 'room123' }); assert.equal(synced, 0);
+    emit({ type: 'incoming-call' }); assert.equal(synced, 1);
+  }
+});
+
+test('clicking the text field or typing enables call sound; cancelled pending audio stays silent', async t => {
+  const f = await ui(t); let created = 0, resumed = 0, started = 0, resolveResume;
+  f.window.AudioContext = class {
+    constructor() { created++; this.state = 'suspended'; this.currentTime = 0; }
+    async resume() { resumed++; this.state = 'running'; }
+    createOscillator() { return { connect() {}, disconnect() {}, frequency: {}, start() { started++; }, stop() {} }; }
+    createGain() { return { connect() {}, disconnect() {}, gain: { setValueAtTime() {}, linearRampToValueAtTime() {} } }; }
+  };
+  const input = f.document.querySelector('#message-input'); input.click(); await delay();
+  assert.equal(created, 1); assert.equal(resumed, 1); assert.equal(started, 0);
+  f.appState.sound.state = 'suspended';
+  input.dispatchEvent(new f.window.KeyboardEvent('keydown', { key: 'a', bubbles: true })); await delay();
+  assert.equal(resumed, 2); assert.equal(started, 0);
+  const context = f.appState.sound; context.state = 'suspended';
+  context.resume = () => new Promise(resolve => { resolveResume = () => { context.state = 'running'; resolve(); }; });
+  const cancel = f.window.playCallRingtone(); cancel(); resolveResume(); await delay();
+  assert.equal(started, 0);
+  context.state = 'suspended'; const stop = f.window.playCallRingtone(); resolveResume(); await delay();
+  assert.equal(started, 4); stop();
+  f.appState.calls = {}; f.window.showSettings();
+  f.document.querySelector('[data-action="test-ringtone"]').click(); await delay();
+  assert.equal(started, 8);
 });
 
 test('typing activity sends only flags and clears on pause, send and hidden chat', async t => {

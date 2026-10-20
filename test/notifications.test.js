@@ -74,6 +74,25 @@ test('only incoming voice and video calls request audible push alerts', async ()
   assert.ok(w.shown[3].vibrate.length > 0);
 });
 
+test('voice and video pushes wake same-origin tabs even in the background or inbox', async () => {
+  const received = [[], [], [], []];
+  const windows = [
+    { url: 'https://chat.example/', visibilityState: 'hidden' },
+    { url: 'https://chat.example/?room=another-room', visibilityState: 'visible' },
+    { url: 'https://chat.example/c/member-room', visibilityState: 'hidden' },
+    { url: 'https://other.example/', visibilityState: 'hidden' },
+  ].map((client, index) => ({ ...client, postMessage: message => received[index].push(message) }));
+  const w = worker(windows);
+  await w.push({ kind: 'message', title: 'New message' });
+  assert.ok(received.every(messages => messages.length === 0));
+  for (const media of ['voice', 'video']) {
+    await w.push({ kind: 'call', callId: `call-${media}`, roomId: 'room-one', media, title: `Incoming ${media} call` });
+    for (const messages of received.slice(0, 3)) assert.equal(messages.at(-1).type, 'incoming-call');
+  }
+  assert.equal(received[0].length, 2); assert.equal(received[3].length, 0);
+  assert.equal(w.shown.length, 3);
+});
+
 test('notification targets stay on this site and invalid URLs still show an alert', async () => {
   const w = worker();
   for (const url of ['https://other.example/phishing', 'https://[invalid']) {

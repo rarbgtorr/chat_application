@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {VoiceCall} from '../public/voice-call.js';
-import {Camera,IncomingRingtone,sendCapturedPhoto} from '../public/chat-media.js';
+import {Camera,IncomingRingtone,installMedia,sendCapturedPhoto} from '../public/chat-media.js';
+import {JSDOM} from 'jsdom';
 function fixture(options={}){
  const requests=[],constraints=[],added=[];
  const audioTrack={kind:'audio',enabled:true,stopped:false,stop(){this.stopped=true;}},videoTrack={kind:'video',enabled:true,stopped:false,stop(){this.stopped=true;}};
@@ -79,4 +80,30 @@ test('incoming ringtone repeats for one call and stops when the call changes sta
  assert.equal(rings.length,1);assert.equal(intervals.size,1);assert.equal([...intervals.values()][0].ms,1400);
  ringtone.start('call-one');assert.equal(rings.length,1);assert.equal(intervals.size,1);intervals.values().next().value.fn();assert.equal(rings.length,2);
  ringtone.stop();assert.equal(intervals.size,0);assert.equal(ringtone.callId,null);assert.equal(stopped,2);
+});
+
+test('hidden app rings only for server-authorized calls, including a push during an in-flight check',async t=>{
+ const dom=new JSDOM('<dialog id="modal"></dialog>',{pretendToBeVisual:true});
+ const original=new Map(['window','document','navigator'].map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+ for(const [key,value] of Object.entries({window:dom.window,document:dom.window.document,navigator:dom.window.navigator}))Object.defineProperty(globalThis,key,{configurable:true,value});
+ Object.defineProperty(document,'hidden',{configurable:true,value:true});
+ let next=1,rings=0,stops=0,requests=0,finishFirst,serverCalls=[];const intervals=new Map();
+ t.mock.method(globalThis,'setInterval',(fn,ms)=>{const id=next++;intervals.set(id,{fn,ms});return id;});
+ t.mock.method(globalThis,'clearInterval',id=>intervals.delete(id));
+ let media;
+ t.after(()=>{media?.close();dom.window.close();for(const [key,descriptor] of original){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}});
+ const first=new Promise(resolve=>{finishFirst=resolve;});
+ media=installMedia({api:async()=>++requests===1?first:serverCalls,post:async()=>({}),config:{},room:()=>null,
+   preview(){},modal(){},dismiss(){},toast(){},recording:()=>false,ring:()=>{rings++;return()=>stops++;}});
+ assert.equal(requests,1);assert.equal(rings,0);
+ serverCalls=[{id:'incoming-voice',roomId:'not-selected',incoming:true,status:'ringing',media:'voice'}];
+ // A call push can arrive while an earlier request still holds an empty snapshot.
+ await media.sync();finishFirst([]);await new Promise(setImmediate);
+ assert.equal(requests,2);assert.equal(rings,1);assert.match(document.querySelector('#call-panel').textContent,/Incoming voice call/);
+ await media.sync();assert.equal(rings,1);
+ serverCalls=[];await media.sync();assert.equal(stops,1);assert.ok(document.querySelector('#call-panel').classList.contains('hidden'));
+ serverCalls=[{id:'incoming-video',roomId:'not-selected',incoming:true,status:'ringing',media:'video'}];
+ await media.sync();assert.equal(rings,2);assert.match(document.querySelector('#call-panel').textContent,/Incoming video call/);
+ serverCalls=[];await media.sync();assert.equal(stops,2);
+ await media.sync();assert.equal(rings,2);
 });

@@ -40,7 +40,15 @@ self.addEventListener('push', event => {
   const delivered = ['message', 'reply'].includes(payload.kind) && payload.roomId
     ? fetch('/api/delivered', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomIds: [payload.roomId] }) }).catch(() => {})
     : Promise.resolve();
-  event.waitUntil(Promise.allSettled([notification, delivered]));
+  // Wake an existing app tab even when its chat is hidden. The tab checks the
+  // authenticated call list before ringing; push contents never grant call access.
+  const incoming = call ? self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(windows => {
+    for (const client of windows) {
+      if (new URL(client.url).origin !== self.location.origin) continue;
+      try { client.postMessage({ type: 'incoming-call' }); } catch {}
+    }
+  }) : Promise.resolve();
+  event.waitUntil(Promise.allSettled([notification, delivered, incoming]));
 });
 self.addEventListener('notificationclick', event => {
   event.notification.close();
