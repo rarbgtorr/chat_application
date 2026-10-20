@@ -172,19 +172,36 @@ test('message deletion controls follow sender ownership and admin permissions', 
     { id: 'staff-other', seq: 2, body: 'Staff', sender: 'Wingfactor Support', sender_role: 'agent', own: false, created_at: Date.now() },
   );
   await client.window.refresh();
-  assert.ok(client.document.querySelector('[data-delete-message="client-own"]'));
-  assert.ok(client.document.querySelector('[data-delete-message="client-own"]').closest('.bubble'));
-  assert.equal(client.document.querySelector('[data-message-menu]'), null);
-  assert.equal(client.document.querySelector('[data-delete-message="staff-other"]'), null);
+  client.window.confirm = () => { throw new Error('Message deletion must not use browser confirmation.'); };
+  assert.equal(client.document.querySelector('.message button'), null);
+  assert.equal(client.document.querySelector('[data-message-id="staff-other"]').hasAttribute('data-selectable'), false);
+  const bubble = client.document.querySelector('[data-message-id="client-own"] .bubble');
+  bubble.dispatchEvent(new client.window.MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+  await until(() => client.document.querySelector('[data-delete-options="client-own"]'));
+  bubble.dispatchEvent(new client.window.MouseEvent('pointerup', { bubbles: true }));
+  assert.ok(bubble.closest('.message').classList.contains('selected'));
+  assert.equal(client.document.querySelector('.bubble button'), null);
+  await client.window.refresh();
+  assert.ok(client.document.querySelector('[data-delete-options="client-own"]'));
+  client.document.querySelector('[data-delete-options="client-own"]').click();
+  assert.equal(client.calls.some(call => call.method === 'DELETE'), false);
+  assert.equal(client.document.querySelector('[data-delete-message="client-own"]').textContent.trim(), 'Delete for everyone');
+  client.document.querySelector('#modal [data-action="close-modal"]').click();
+  assert.equal(client.calls.some(call => call.method === 'DELETE'), false);
+  client.document.querySelector('[data-delete-options="client-own"]').click();
   client.document.querySelector('[data-delete-message="client-own"]').click();
   await until(() => client.messages.find(message => message.id === 'client-own')?.deleted_at && !client.document.querySelector('[data-delete-message="client-own"]'));
   assert.match(client.document.querySelector('.deleted-message').textContent, /You deleted this message/);
   assert.equal(client.document.querySelector('[data-delete-message="client-own"]'), null);
+  assert.equal(client.document.querySelector('#message-selection-toolbar'), null);
 
   const admin = await ui(t, { role: 'admin' });
   admin.messages.push({ id: 'client-message', seq: 1, body: 'Client', sender: 'Visible Client', sender_role: 'client', own: false, created_at: Date.now() });
   await admin.window.refresh();
-  assert.ok(admin.document.querySelector('[data-delete-message="client-message"]'));
+  admin.document.querySelector('.bubble').dispatchEvent(new admin.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  assert.ok(admin.document.querySelector('[data-delete-options="client-message"]'));
+  admin.document.dispatchEvent(new admin.window.KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+  assert.equal(admin.document.querySelector('#message-selection-toolbar'), null);
   assert.match(deleteMigration, /role_name<>'admin' and m\.sender_id<>who/);
   assert.match(deleteMigration, /update public\.wc_messages set body='',attachment_id=null,deleted_at=/);
   assert.match(deleteMigration, /revoke all on function public\.wc_message_delete/);
@@ -194,6 +211,44 @@ test('message deletion controls follow sender ownership and admin permissions', 
     created_at: Date.now(), deleted_at: Date.now(), deleted_by_me: false });
   await teammate.window.refresh();
   assert.match(teammate.document.querySelector('.deleted-message').textContent, /This message was deleted/);
+});
+
+test('message selection cancels for short taps, scrolling, movement and pointer cancellation', async t => {
+  const f = await ui(t, { role: 'agent' });
+  f.messages.push({ id: 'my-reply', seq: 1, body: 'Reply', sender: 'Wingfactor Support', sender_role: 'agent', own: true, created_at: Date.now() });
+  await f.window.refresh();
+  const timers = new Map(); let next = 10000;
+  const setTimer = f.window.setTimeout.bind(f.window), clearTimer = f.window.clearTimeout.bind(f.window);
+  f.window.setTimeout = (fn, ms, ...args) => { if (ms === 500) { const id = next++; timers.set(id, fn); return id; } return setTimer(fn, ms, ...args); };
+  f.window.clearTimeout = id => { if (timers.has(id)) timers.delete(id); else clearTimer(id); };
+  const bubble = f.document.querySelector('.bubble');
+  const down = () => bubble.dispatchEvent(new f.window.MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+  for (const type of ['pointerup', 'pointercancel', 'scroll', 'pointermove']) {
+    down(); assert.equal(timers.size, 1);
+    bubble.dispatchEvent(new f.window.MouseEvent(type, { bubbles: true, clientX: 30, clientY: 30 }));
+    assert.equal(timers.size, 0);
+    assert.equal(f.document.querySelector('#message-selection-toolbar'), null);
+  }
+  down(); [...timers.values()][0]();
+  assert.ok(f.document.querySelector('[data-delete-options="my-reply"]'));
+  f.document.querySelector('[data-action="clear-message-selection"]').click();
+  assert.equal(f.document.querySelector('#message-selection-toolbar'), null);
+  const message = f.document.querySelector('.message');
+  message.dispatchEvent(new f.window.KeyboardEvent('keydown', { bubbles: true, key: 'F10', shiftKey: true }));
+  assert.ok(f.document.querySelector('[data-delete-options="my-reply"]'));
+});
+
+test('a long press on a photo selects it without opening the image viewer', async t => {
+  const f = await ui(t, { role: 'client' });
+  f.messages.push({ id: 'my-photo', seq: 1, body: '', attachment_id: 'photo-file', filename: 'photo.jpg', mime: 'image/jpeg',
+    own: true, sender_role: 'client', created_at: Date.now() });
+  await f.window.refresh();
+  const photo = f.document.querySelector('.image-open');
+  photo.dispatchEvent(new f.window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  await until(() => f.document.querySelector('[data-delete-options="my-photo"]'));
+  photo.dispatchEvent(new f.window.MouseEvent('pointerup', { bubbles: true })); photo.click();
+  assert.equal(f.document.querySelector('.image-viewer'), null);
+  assert.equal(f.document.querySelector('#modal').open, false);
 });
 
 test('opening a client camera photo gives staff a full preview and starts a device download', async t => {

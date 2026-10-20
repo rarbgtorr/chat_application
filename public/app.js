@@ -28,8 +28,8 @@ const brand = `<div class="brand"><span class="brand-mark">w<span>·</span></spa
 const state = { me: null, rooms: [], users: [], roomId: null, messages: [], hasMore: false,
   filter: 'all', search: '', file: null, stream: null, connected: false, alerts: [], push: null,
   recorder: null, recordingTimer: null, loading: false, queuedRefresh: false, sound: null,
-  pendingMessages: [] };
-let toastTimer, refreshTimer;
+  pendingMessages: [], selectedMessageId: null };
+let toastTimer, refreshTimer, messagePress, suppressMessageClick;
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 5000); }
 async function api(path, options = {}) {
   const headers = { ...(options.body && !(options.body instanceof Blob) ? { 'Content-Type': 'application/json' } : {}), ...options.headers };
@@ -53,6 +53,27 @@ const clientName = room => room?.private?.name || room?.client?.name || room?.co
 const clientNotes = room => room?.private?.notes ?? room?.client?.notes ?? '';
 function modal(title, content) { state.media?.closeCamera(); $('#modal').classList.remove('camera-dialog'); $('#modal-body').innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2>${iconButton('close', 'close-modal', 'Close')}</div>${content}`; if (!$('#modal').open) $('#modal').showModal(); }
 function dismiss() { $('#modal').close(); }
+function cancelMessagePress() { clearTimeout(messagePress?.timer); messagePress = null; }
+function clearMessageSelection() {
+  cancelMessagePress(); state.selectedMessageId = null;
+  $('#message-selection-toolbar')?.remove();
+  document.querySelectorAll('.message.selected').forEach(node => node.classList.remove('selected'));
+}
+function syncMessageSelection() {
+  const message = state.messages.find(item => item.id === state.selectedMessageId);
+  if (!message || message.deleted_at || !(message.own || state.me?.role === 'admin')) return clearMessageSelection();
+  document.querySelectorAll('[data-message-id]').forEach(node => node.classList.toggle('selected', node.dataset.messageId === message.id));
+  if (!$('#message-selection-toolbar')) {
+    const toolbar = document.createElement('div'); toolbar.id = 'message-selection-toolbar'; toolbar.className = 'message-selection-toolbar';
+    toolbar.setAttribute('role', 'toolbar'); toolbar.setAttribute('aria-label', 'Selected message actions');
+    toolbar.innerHTML = `${iconButton('back', 'clear-message-selection', 'Cancel message selection')}<span role="status">1 selected</span><button class="icon-btn" type="button" data-delete-options="${esc(message.id)}" aria-label="Delete selected message" title="Delete message">${icon('trash')}</button>`;
+    $('#conversation').append(toolbar);
+  } else $('#message-selection-toolbar [data-delete-options]').dataset.deleteOptions = message.id;
+}
+function selectMessage(messageId) {
+  state.selectedMessageId = messageId; syncMessageSelection();
+  window.getSelection()?.removeAllRanges();
+}
 function initials(name) { return esc(name.split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase()); }
 function cameraPhoto(message) { return message.sender_role === 'client' && /^photo-\d+\.jpe?g$/i.test(message.filename || ''); }
 function openMessageImage(messageId) {
@@ -101,6 +122,7 @@ function renderList() {
   $('#list-count').textContent = `${state.rooms.length} conversation${state.rooms.length === 1 ? '' : 's'} · history stays saved`;
 }
 function renderChat() {
+  clearMessageSelection();
   const room = selectedRoom();
   $('.layout')?.classList.toggle('has-room', Boolean(room));
   if (!room) {
@@ -143,9 +165,8 @@ function renderMessages(prepend = false) {
     const meta = message.own ? '' : `<div class="message-meta"><span>${esc(message.sender)}</span><time>${formatTime(message.created_at)}</time></div>`;
     const status = `<span class="message-status"><time>${formatTime(message.created_at)}</time>${receipt ? deliveryMark(delivery, message.failed, message.id) : ''}</span>`;
     const canDelete = !message.pending && !deleted && (message.own || state.me.role === 'admin');
-    const remove = canDelete ? `<div class="message-actions"><button type="button" class="message-delete" data-delete-message="${message.id}" aria-label="Delete message for everyone" title="Delete for everyone">${icon('trash')}</button></div>` : '';
     const content = deleted ? `<span class="deleted-message">${icon('deleted')}<em>${message.deleted_by_me ? 'You deleted this message' : 'This message was deleted'}</em></span>` : `${message.body ? `<span class="message-body">${esc(message.body)}</span>` : ''}${attachment}`;
-    return `${divider}<article data-key="${key}" class="message ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="bubble">${remove}${content}${status}</div></article>`;
+    return `${divider}<article data-key="${key}" data-message-id="${esc(message.id)}" ${canDelete ? 'data-selectable="true" tabindex="0" aria-keyshortcuts="Shift+F10" title="Press and hold for message actions"' : ''} class="message ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="bubble">${content}${status}</div></article>`;
   }).join('');
   const template = document.createElement('template');
   template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(clientName(room))}. Send a message to get started.`}</p></div>`}`;
@@ -158,6 +179,7 @@ function renderMessages(prepend = false) {
     if (node !== position) container.insertBefore(node, position);
   });
   [...container.children].filter(node => !keep.has(node)).forEach(node => node.remove());
+  if (state.selectedMessageId) syncMessageSelection();
   if (prepend) container.scrollTop = scrollTop + container.scrollHeight - oldHeight;
   else if (atBottom || !oldHeight) container.scrollTop = container.scrollHeight;
 }
@@ -446,6 +468,40 @@ document.addEventListener('submit', async event => {
     if (target) target.textContent = error.message; else toast(error.message);
   } finally { if (button?.isConnected && form.id !== 'message-form') { button.disabled = false; button.innerHTML = oldLabel; } }
 });
+document.addEventListener('pointerdown', event => {
+  cancelMessagePress();
+  const message = event.target.closest('.message[data-selectable="true"]');
+  if (!message || event.isPrimary === false || (event.button !== undefined && event.button !== 0) ||
+    !event.target.closest('.bubble') || event.target.closest('a,audio,video,input,button:not(.image-open)')) return;
+  const press = { id: message.dataset.messageId, pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  press.timer = setTimeout(() => {
+    if (messagePress !== press || !message.isConnected) return;
+    selectMessage(press.id); press.selected = true; suppressMessageClick = { id: press.id, until: Date.now() + 1000 };
+  }, 500);
+  messagePress = press;
+});
+document.addEventListener('pointermove', event => {
+  if (messagePress && event.pointerId === messagePress.pointerId &&
+    Math.hypot(event.clientX - messagePress.x, event.clientY - messagePress.y) > 10) cancelMessagePress();
+});
+for (const name of ['pointerup', 'pointercancel']) document.addEventListener(name, () => {
+  if (messagePress?.selected) suppressMessageClick = { id: messagePress.id, until: Date.now() + 1000 };
+  cancelMessagePress();
+});
+document.addEventListener('scroll', cancelMessagePress, true);
+document.addEventListener('contextmenu', event => {
+  const message = event.target.closest('.message[data-selectable="true"] .bubble');
+  if (!message || event.target.closest('audio,video,a')) return;
+  const id = message.closest('.message').dataset.messageId;
+  event.preventDefault(); cancelMessagePress(); selectMessage(id); suppressMessageClick = { id, until: Date.now() + 1000 };
+});
+document.addEventListener('click', event => {
+  const message = event.target.closest('[data-message-id]');
+  if (suppressMessageClick && message && suppressMessageClick.id === message.dataset.messageId && Date.now() < suppressMessageClick.until) {
+    suppressMessageClick = null; event.preventDefault(); event.stopImmediatePropagation(); return;
+  }
+  if (state.selectedMessageId && !event.target.closest('#message-selection-toolbar,#modal') && message?.dataset.messageId !== state.selectedMessageId) clearMessageSelection();
+}, true);
 document.addEventListener('click', async event => {
   const button = event.target.closest('button'); if (!button) return;
   try {
@@ -454,13 +510,21 @@ document.addEventListener('click', async event => {
     if (button.dataset.room) return await selectRoom(button.dataset.room);
     if (button.dataset.alertRoom) { dismiss(); return await selectRoom(button.dataset.alertRoom); }
     if (button.dataset.openImage) { openMessageImage(button.dataset.openImage); return; }
+    if (button.dataset.deleteOptions) {
+      const message = state.messages.find(item => item.id === button.dataset.deleteOptions);
+      if (!message || message.deleted_at || !(message.own || state.me.role === 'admin')) return clearMessageSelection();
+      modal('Delete message', `<div class="delete-message-options"><button type="button" class="danger" data-delete-message="${esc(message.id)}">${icon('trash')} Delete for everyone</button><button type="button" class="secondary" data-action="close-modal">Cancel</button></div>`);
+      return;
+    }
     if (button.dataset.deleteMessage) {
-      if (!confirm('Delete this message for everyone? This cannot be undone.')) return;
-      const result = await api(`/api/rooms/${state.roomId}/messages/${button.dataset.deleteMessage}`, { method: 'DELETE' });
+      button.disabled = true;
+      let result;
+      try { result = await api(`/api/rooms/${state.roomId}/messages/${button.dataset.deleteMessage}`, { method: 'DELETE' }); }
+      catch (error) { button.disabled = false; throw error; }
       const message = state.messages.find(item => item.id === button.dataset.deleteMessage);
       if (message) Object.assign(message, { body: '', attachment_id: null, attachment_expired: false,
         deleted_at: result.deletedAt || Date.now(), deleted_by_me: true, delivery: undefined });
-      renderMessages();
+      dismiss(); $('#modal-body').replaceChildren(); clearMessageSelection(); renderMessages();
       await refresh(); toast('Message deleted for everyone.'); return;
     }
     if (button.dataset.filter) {
@@ -476,6 +540,7 @@ document.addEventListener('click', async event => {
       modal('Reset teammate password', `<form id="reset-form" data-user-id="${button.dataset.resetUser}"><p class="modal-description">This revokes the teammate’s existing sessions and device notifications.</p><label class="field"><span>New password · at least 14 characters</span><input name="password" type="password" minlength="14" maxlength="200" autocomplete="new-password" required></label><div class="error form-error"></div><div class="modal-actions"><button class="primary" type="submit">Reset password</button></div></form>`); return;
     }
     switch (button.dataset.action) {
+      case 'clear-message-selection': clearMessageSelection(); break;
       case 'close-modal': dismiss(); break;
       case 'back': state.media?.closeCamera(); if (state.recorder?.state === 'recording') throw new Error('Stop your recording first.'); state.roomId = null; renderChat(); break;
       case 'conversations': $('.layout').classList.remove('has-room'); break;
@@ -516,6 +581,11 @@ document.addEventListener('click', async event => {
 document.addEventListener('input', event => { if (event.target.id === 'room-search') { state.search = event.target.value; renderList(); } });
 document.addEventListener('change', event => { if (event.target.id === 'file-input' && event.target.files[0]) { previewFile(event.target.files[0]); event.target.value = ''; } });
 document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') { clearMessageSelection(); return; }
+  const message = event.target.closest('.message[data-selectable="true"]');
+  if (message && (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey)) {
+    event.preventDefault(); selectMessage(message.dataset.messageId); return;
+  }
   if (event.target.id === 'message-input' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault(); if (!$('#send-button').disabled) $('#message-form').requestSubmit();
   }
