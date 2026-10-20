@@ -170,6 +170,12 @@ test('client, teammate, and admin outgoing messages show WhatsApp delivery ticks
 
 test('message deletion controls follow sender ownership and admin permissions', async t => {
   const client = await ui(t, { role: 'client' });
+  let noticeTimer;
+  const setTimer = client.window.setTimeout.bind(client.window);
+  client.window.setTimeout = (fn, ms, ...args) => {
+    if (ms === 2000) { noticeTimer = { fn, ms }; return 1000000; }
+    return setTimer(fn, ms, ...args);
+  };
   client.messages.push(
     { id: 'client-own', seq: 1, body: 'Mine', sender: 'Client', sender_role: 'client', own: true, created_at: Date.now(), delivery: 'sent' },
     { id: 'staff-other', seq: 2, body: 'Staff', sender: 'Wingfactor Support', sender_role: 'agent', own: false, created_at: Date.now() },
@@ -200,6 +206,10 @@ test('message deletion controls follow sender ownership and admin permissions', 
   assert.match(client.document.querySelector('.deleted-message').textContent, /You deleted this message/);
   assert.equal(client.document.querySelector('[data-delete-message="client-own"]'), null);
   assert.equal(client.document.querySelector('.message.selected'), null);
+  await until(() => noticeTimer && client.document.querySelector('#toast').classList.contains('visible'));
+  assert.equal(client.document.querySelector('#toast').textContent, 'Message deleted for everyone.');
+  assert.equal(noticeTimer.ms, 2000); noticeTimer.fn();
+  assert.equal(client.document.querySelector('#toast').classList.contains('visible'), false);
 
   const admin = await ui(t, { role: 'admin' });
   admin.messages.push({ id: 'client-message', seq: 1, body: 'Client', sender: 'Visible Client', sender_role: 'client', own: false, created_at: Date.now() });
@@ -328,6 +338,21 @@ test('live updates preserve existing media DOM elements and unsent drafts', asyn
   assert.equal(f.document.querySelector('audio'), audio);
   assert.equal(f.document.querySelector('#message-input').value, 'My unsent answer');
   assert.equal(f.document.querySelectorAll('.message').length, 2);
+});
+
+test('incoming text and image messages do not play the call ringtone', async t => {
+  const f = await ui(t);
+  let rings = 0; f.window.playCallRingtone = () => { rings++; };
+  f.messages.push({ id: 'first', seq: 1, body: 'First message', own: false, sender: 'Client', sender_role: 'client', created_at: Date.now() });
+  await f.window.refresh();
+  f.messages.push({ id: 'text', seq: 2, body: 'New text', own: false, sender: 'Client', sender_role: 'client', created_at: Date.now() });
+  await f.window.refresh();
+  f.messages.push({ id: 'image', seq: 3, body: '', own: false, sender: 'Client', sender_role: 'client', created_at: Date.now(),
+    attachment_id: 'new-image', filename: 'photo.jpg', mime: 'image/jpeg' });
+  await f.window.refresh();
+  assert.equal(f.document.querySelectorAll('.message').length, 3);
+  assert.ok(f.document.querySelector('.message img'));
+  assert.equal(rings, 0);
 });
 
 test('administrator can reach private room settings and assignment controls', async t => {

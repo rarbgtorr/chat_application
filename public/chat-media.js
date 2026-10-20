@@ -37,11 +37,11 @@ export class IncomingRingtone {
   stop(){if(this.timer!==null)this.timers.clearInterval(this.timer);if(typeof this.cancelRing==='function')this.cancelRing();this.cancelRing=null;this.timer=null;this.callId=null;}
 }
 
-export function installMedia({api,post,config,room,preview,modal,dismiss,toast,recording,beep}){
+export function installMedia({api,post,config,room,preview,modal,dismiss,toast,recording,ring}){
   const host=document.createElement('section');host.id='call-panel';host.className='call-panel hidden';host.setAttribute('aria-live','polite');document.body.append(host);
   const audio=document.createElement('audio');audio.autoplay=true;document.body.append(audio);
   let camera=null,photo=null,photoUrl=null,closed=false,syncing=false,remoteStream=null,localStream=null;
-  const ringtone=new IncomingRingtone({ring:beep});
+  const ringtone=new IncomingRingtone({ring});
   const attach=(selector,stream,muted=false)=>{const el=host.querySelector(selector);if(!el)return;el.muted=muted;if(el.srcObject!==stream)el.srcObject=stream;if(stream)void el.play().catch(()=>{});};
   const render=c=>{
     host.classList.toggle('hidden',!c);host.classList.toggle('video-call',c?.media==='video');if(!c){host.replaceChildren();return;}

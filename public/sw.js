@@ -10,18 +10,14 @@ self.addEventListener('push', event => {
   const call = payload.kind === 'call';
   const chatMessage = ['message', 'reply'].includes(payload.kind);
   const notification = notificationQueue.catch(() => {}).then(async () => {
-    // Update one notification per conversation; do not sound every message in a burst.
+    // Chat notifications stay visible but silent; sound and vibration are for calls only.
     const tag = chatMessage && payload.roomId ? `chat-${payload.roomId}` : payload.tag || `support-${payload.kind || 'update'}`;
-    const previous = await self.registration.getNotifications({ tag });
-    const now = Date.now(), lastAudibleAt = previous[0]?.data?.lastAudibleAt || 0;
-    const quietUpdate = chatMessage && previous.length > 0 && now - lastAudibleAt < 15000;
     const title = String(payload.title || 'New chat notification');
     await self.registration.showNotification(/wingfactor/i.test(title) ? title : `Wingfactor · ${title}`, {
       body: payload.body, icon: '/icon.svg', badge: '/icon.svg',
-      tag, renotify: !quietUpdate, requireInteraction: call,
-      ...(quietUpdate ? { silent: true } : { vibrate: call ? [500, 200, 500, 200, 500] : [200, 100, 200] }),
-      data: { url: target.origin === self.location.origin ? target.href : self.location.origin,
-        lastAudibleAt: quietUpdate ? lastAudibleAt : now },
+      tag, renotify: call, requireInteraction: call,
+      ...(call ? { vibrate: [500, 200, 500, 200, 500] } : { silent: true }),
+      data: { url: target.origin === self.location.origin ? target.href : self.location.origin },
     });
   });
   notificationQueue = notification;

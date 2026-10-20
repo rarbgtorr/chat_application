@@ -30,7 +30,7 @@ const state = { me: null, rooms: [], users: [], roomId: null, messages: [], hasM
   recorder: null, recordingTimer: null, loading: false, queuedRefresh: false, sound: null,
   pendingMessages: [], selectedMessageId: null };
 let toastTimer, refreshTimer, messagePress, suppressMessageClick;
-function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 5000); }
+function toast(message, duration = 5000) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), duration); }
 async function api(path, options = {}) {
   const headers = { ...(options.body && !(options.body instanceof Blob) ? { 'Content-Type': 'application/json' } : {}), ...options.headers };
   const response = await fetch(path, { ...options, headers, credentials: 'same-origin', cache: 'no-store' });
@@ -195,7 +195,6 @@ function notificationBanner() {
 async function loadMessages(roomId, before) {
   const result = await api(`/api/rooms/${roomId}/messages${before ? `?before=${before}` : ''}`);
   if (state.roomId !== roomId) return;
-  const previousLast = state.messages.at(-1)?.seq;
   const oldSignature = state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.deleted_at || ''}:${m.deleted_by_me || ''}:${m.delivery || ''}`).join(',');
   if (before) state.messages = [...result.messages, ...state.messages];
   else {
@@ -210,7 +209,6 @@ async function loadMessages(roomId, before) {
     if (message.localUrl) URL.revokeObjectURL(message.localUrl); return false;
   });
   if (oldSignature !== state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.deleted_at || ''}:${m.deleted_by_me || ''}:${m.delivery || ''}`).join(',') || !$('#messages')?.querySelector('.message')) renderMessages(Boolean(before));
-  if (!before && previousLast && state.messages.at(-1)?.seq > previousLast && !state.messages.at(-1).own) beep();
   if (!document.hidden && state.messages.length) {
     await post(`/api/rooms/${roomId}/read`, { seq: state.messages.at(-1).seq });
     const room = selectedRoom(); if (room) room.unread = 0; renderList();
@@ -264,7 +262,7 @@ async function startEvents() {
   });
   stream.onerror = () => connection(false);
 }
-function beep() {
+function playCallRingtone() {
   if (!state.sound || state.sound.state !== 'running') return;
   const nodes = [], now = state.sound.currentTime;
   for (const offset of [0, .58]) {
@@ -296,7 +294,7 @@ async function boot() {
     }
     const result = await api('/api/me'); state.me = result.user; state.push = result.push; state.realtime = result.realtime; state.calls=result.calls;
     state.media?.close();state.media=null;
-    if(result.calls){const {installMedia}=await import('/chat-media.js');state.media=installMedia({api,post,config:result.calls,room:id=>{const r=state.rooms.find(x=>x.id===id);return r?{...r,code:state.me?.role==='client'?'Wingfactor Support':clientName(r)}:null;},preview:previewFile,modal,dismiss,toast,recording:()=>state.recorder?.state==='recording',beep});}
+    if(result.calls){const {installMedia}=await import('/chat-media.js');state.media=installMedia({api,post,config:result.calls,room:id=>{const r=state.rooms.find(x=>x.id===id);return r?{...r,code:state.me?.role==='client'?'Wingfactor Support':clientName(r)}:null;},preview:previewFile,modal,dismiss,toast,recording:()=>state.recorder?.state==='recording',ring:playCallRingtone});}
     state.rooms = await api('/api/rooms'); void acknowledgeDeliveries();
     state.roomId = state.me.role === 'client' ? state.me.roomId : new URLSearchParams(location.search).get('room');
     if (!selectedRoom()) state.roomId = null;
@@ -545,7 +543,7 @@ document.addEventListener('click', async event => {
       if (message) Object.assign(message, { body: '', attachment_id: null, attachment_expired: false,
         deleted_at: result.deletedAt || Date.now(), deleted_by_me: true, delivery: undefined });
       dismiss(); $('#modal-body').replaceChildren(); clearMessageSelection(); renderMessages();
-      await refresh(); toast('Message deleted for everyone.'); return;
+      await refresh(); toast('Message deleted for everyone.', 2000); return;
     }
     if (button.dataset.filter) {
       state.filter = button.dataset.filter;
