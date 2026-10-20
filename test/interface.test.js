@@ -79,7 +79,7 @@ test('client access secret is exchanged once and removed from the visible URL', 
   assert.equal(f.calls.filter(call => call.path === '/api/client/session').length, 1);
   assert.equal(f.calls[0].data.key, 'private-secret');
   assert.match(f.document.querySelector('.chat-title').textContent, /Wingfactor Support/);
-  assert.equal(f.document.querySelector('.chat-title p:not(#typing-indicator)'), null);
+  assert.equal(f.document.querySelector('.chat-title p'), null);
   assert.match(f.document.querySelector('.composer-footer').textContent, /Securely connected/);
   for (const removed of ['Your private support conversation', 'Private support room', 'Messages stay until your admin deletes them']) assert.equal(f.document.body.textContent.includes(removed), false);
   assert.equal(f.document.querySelector('.inbox'), null);
@@ -378,6 +378,9 @@ test('typing indicators show only other participants in the visible current conv
     const f = await ui(t, { role }); let now = Date.now(); f.window.Date.now = () => now;
     const emit = payload => f.window.testEventStream.listeners.typing({ data: JSON.stringify(payload) });
     const indicator = f.document.querySelector('#typing-indicator');
+    assert.equal(indicator.parentElement, f.document.querySelector('.composer-wrap'));
+    assert.equal(indicator.nextElementSibling, f.document.querySelector('#message-form'));
+    assert.equal(f.document.querySelector('.chat-title #typing-indicator'), null);
     emit({ roomId: 'room123', subject: role === 'client' ? 'room123' : 'agent123', role, typing: true, ttl: 6000 });
     assert.ok(indicator.classList.contains('hidden'));
     const payload = { roomId: 'room123', subject: role === 'client' ? 'staff-other' : 'room123', role: role === 'client' ? 'agent' : 'client', typing: true, ttl: 6000 };
