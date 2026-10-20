@@ -74,6 +74,8 @@ dialog.camera-dialog{inset:0;width:100vw;height:100dvh;max-width:none;max-height
 :root[data-theme="dark"] .image-viewer,:root[data-theme="dark"] .call-videos{background:#0b141a}
 
 /* Compact WhatsApp-style composer: one pill and a separate circular action. */
+:root:not([data-theme="dark"]) .conversation{background:#eae6df}
+:root:not([data-theme="dark"]) .composer-wrap{background:#f0f2f5}
 .composer-wrap{flex-shrink:0}
 .composer{background:transparent;border:0;border-radius:0;box-shadow:none;overflow:visible}
 .composer-row{display:flex;align-items:flex-end;gap:8px}
