@@ -152,6 +152,34 @@ test('text messages appear immediately without putting the composer into a sendi
   finishSend(); await until(() => f.document.querySelector('.message:not(.pending-message)'));
 });
 
+test('Send keeps the composer focused for all roles and respects later manual dismissal', async t => {
+  for (const role of ['client', 'agent', 'admin']) {
+    let finishSend; const messageGate = new Promise(resolve => { finishSend = resolve; });
+    const f = await ui(t, { role, messageGate });
+    const input = f.document.querySelector('#message-input'), send = f.document.querySelector('#send-button');
+    input.focus(); input.value = 'First message';
+    for (const type of ['pointerdown', 'mousedown']) {
+      const down = new f.window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 });
+      send.querySelector('svg').dispatchEvent(down);
+      assert.equal(down.defaultPrevented, true); assert.equal(f.document.activeElement, input);
+    }
+    send.click(); assert.equal(f.document.activeElement, input); assert.equal(input.value, '');
+    assert.equal(f.document.querySelectorAll('.pending-message').length, 1);
+    input.value = 'Next message'; send.click();
+    assert.equal(f.document.activeElement, input); assert.equal(f.document.querySelectorAll('.pending-message').length, 2);
+    // A network response must not bring the keyboard back after the user dismisses it.
+    input.blur(); const dismissedFocus = f.document.activeElement;
+    finishSend(); await until(() => f.document.querySelectorAll('.message:not(.pending-message)').length === 2);
+    assert.equal(f.document.activeElement, dismissedFocus);
+    // Sending a photo programmatically must not open a keyboard that was closed.
+    f.window.previewFile(new f.window.File(['image'], 'photo.jpg', { type: 'image/jpeg' }));
+    f.document.querySelector('#message-form').requestSubmit();
+    assert.equal(f.document.activeElement, dismissedFocus);
+    await until(() => f.document.querySelectorAll('.message:not(.pending-message)').length === 3);
+    assert.equal(f.document.activeElement, dismissedFocus);
+  }
+});
+
 test('client, teammate, and admin outgoing messages show WhatsApp delivery ticks', async t => {
   const f = await ui(t, { role: 'client' });
   const message = { id: 'receipt-message', seq: 1, body: 'Are you there?', sender: 'Client', sender_role: 'client', own: true, created_at: Date.now(), delivery: 'sent' };

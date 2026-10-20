@@ -483,6 +483,13 @@ async function record() {
   toast('Recording… Tap the microphone again to stop. Maximum 3 minutes.');
 }
 
+function keepComposerFocus(event) {
+  if (event.isPrimary === false || (event.button !== undefined && event.button !== 0)) return;
+  if (event.target.closest?.('#message-form #send-button') && document.activeElement === $('#message-input')) event.preventDefault();
+}
+// Tapping Send must not move focus out of the text field and dismiss its keyboard.
+document.addEventListener('pointerdown', keepComposerFocus);
+document.addEventListener('mousedown', keepComposerFocus);
 document.addEventListener('submit', async event => {
   const form = event.target; event.preventDefault();
   const button = form.querySelector('[type="submit"]'); const oldLabel = button?.innerHTML;
@@ -505,6 +512,8 @@ document.addEventListener('submit', async event => {
     } else if (form.id === 'message-form') {
       if (state.recorder?.state === 'recording') throw new Error('Stop the voice recording before sending.');
       const input = $('#message-input'); const value = input.value.trim(); const roomId = state.roomId;
+      // Focus during this user gesture, never after the asynchronous send completes.
+      if (event.submitter?.id === 'send-button') input.focus({ preventScroll: true });
       if (!value && !state.file) return;
       const file = state.file; let pending = state.pendingMessages.find(message => message.id === form.dataset.pendingId);
       if (!pending) {
