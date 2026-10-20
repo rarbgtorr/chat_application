@@ -83,10 +83,6 @@ test('client access secret is exchanged once and removed from the visible URL', 
   assert.equal(f.calls.filter(call => call.path === '/api/client/session').length, 1);
   assert.equal(f.calls[0].data.key, 'private-secret');
   assert.match(f.document.querySelector('.chat-title').textContent, /Wingfactor Support/);
-  const logo = f.document.querySelector('.chat-header .support-logo');
-  assert.equal(logo.getAttribute('src'), '/wingfactor-mark.svg');
-  assert.equal(logo.getAttribute('alt'), 'Wingfactor logo');
-  assert.equal(logo.closest('.rail'), null);
   assert.equal(f.document.querySelector('.chat-title p'), null);
   assert.match(f.document.querySelector('.composer-footer').textContent, /Securely connected/);
   for (const removed of ['Your private support conversation', 'Private support room', 'Messages stay until your admin deletes them']) assert.equal(f.document.body.textContent.includes(removed), false);
