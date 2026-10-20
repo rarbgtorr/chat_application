@@ -20,7 +20,6 @@ const icons = {
   file: '<path d="M14 2H5v20h14V7l-5-5ZM14 2v6h5M8 13h8M8 17h5"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
-  moreVertical: '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
   deleted: '<circle cx="12" cy="12" r="9"/><path d="m6 6 12 12"/>',
 };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.chat}</svg>`;
@@ -54,10 +53,6 @@ const clientName = room => room?.private?.name || room?.client?.name || room?.co
 const clientNotes = room => room?.private?.notes ?? room?.client?.notes ?? '';
 function modal(title, content) { state.media?.closeCamera(); $('#modal').classList.remove('camera-dialog'); $('#modal-body').innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2>${iconButton('close', 'close-modal', 'Close')}</div>${content}`; if (!$('#modal').open) $('#modal').showModal(); }
 function dismiss() { $('#modal').close(); }
-function closeMessageMenus(except = null) {
-  document.querySelectorAll('[data-message-popover]').forEach(menu => menu.classList.toggle('hidden', menu !== except));
-  document.querySelectorAll('[data-message-menu]').forEach(button => button.setAttribute('aria-expanded', String(button.parentElement?.querySelector('[data-message-popover]') === except)));
-}
 function initials(name) { return esc(name.split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase()); }
 function cameraPhoto(message) { return message.sender_role === 'client' && /^photo-\d+\.jpe?g$/i.test(message.filename || ''); }
 function openMessageImage(messageId) {
@@ -148,9 +143,9 @@ function renderMessages(prepend = false) {
     const meta = message.own ? '' : `<div class="message-meta"><span>${esc(message.sender)}</span><time>${formatTime(message.created_at)}</time></div>`;
     const status = `<span class="message-status"><time>${formatTime(message.created_at)}</time>${receipt ? deliveryMark(delivery, message.failed, message.id) : ''}</span>`;
     const canDelete = !message.pending && !deleted && (message.own || state.me.role === 'admin');
-    const menu = canDelete ? `<div class="message-menu"><button type="button" class="message-more" data-message-menu="${message.id}" aria-label="Message options" title="Message options" aria-haspopup="menu" aria-expanded="false">${icon('moreVertical')}</button><div class="message-menu-popover hidden" data-message-popover="${message.id}" role="menu"><button type="button" data-delete-message="${message.id}" role="menuitem">${icon('trash')} Delete for everyone</button></div></div>` : '';
+    const remove = canDelete ? `<div class="message-actions"><button type="button" class="message-delete" data-delete-message="${message.id}" aria-label="Delete message for everyone" title="Delete for everyone">${icon('trash')}</button></div>` : '';
     const content = deleted ? `<span class="deleted-message">${icon('deleted')}<em>${message.deleted_by_me ? 'You deleted this message' : 'This message was deleted'}</em></span>` : `${message.body ? `<span class="message-body">${esc(message.body)}</span>` : ''}${attachment}`;
-    return `${divider}<article data-key="${key}" class="message ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="message-shell"><div class="bubble">${content}${status}</div>${menu}</div></article>`;
+    return `${divider}<article data-key="${key}" class="message ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="bubble">${remove}${content}${status}</div></article>`;
   }).join('');
   const template = document.createElement('template');
   template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(clientName(room))}. Send a message to get started.`}</p></div>`}`;
@@ -250,10 +245,22 @@ async function startEvents() {
 }
 function beep() {
   if (!state.sound || state.sound.state !== 'running') return;
-  const oscillator = state.sound.createOscillator(), gain = state.sound.createGain();
-  oscillator.connect(gain); gain.connect(state.sound.destination); oscillator.frequency.value = 750;
-  gain.gain.setValueAtTime(0.08, state.sound.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, state.sound.currentTime + .2);
-  oscillator.start(); oscillator.stop(state.sound.currentTime + .2);
+  const nodes = [], now = state.sound.currentTime;
+  for (const offset of [0, .58]) {
+    for (const frequency of [660, 880]) {
+      const oscillator = state.sound.createOscillator(), gain = state.sound.createGain();
+      nodes.push(oscillator); oscillator.connect(gain); gain.connect(state.sound.destination);
+      oscillator.frequency.value = frequency;
+      const start = now + offset;
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(.22, start + .025);
+      gain.gain.setValueAtTime(.22, start + .34);
+      gain.gain.linearRampToValueAtTime(0, start + .4);
+      oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
+      oscillator.start(start); oscillator.stop(start + .4);
+    }
+  }
+  return () => nodes.forEach(node => { try { node.stop(); } catch {} });
 }
 async function boot() {
   try {
@@ -440,7 +447,6 @@ document.addEventListener('submit', async event => {
   } finally { if (button?.isConnected && form.id !== 'message-form') { button.disabled = false; button.innerHTML = oldLabel; } }
 });
 document.addEventListener('click', async event => {
-  if (!event.target.closest('.message-menu')) closeMessageMenus();
   const button = event.target.closest('button'); if (!button) return;
   try {
     if (!state.sound && window.AudioContext) { state.sound = new AudioContext(); }
@@ -448,13 +454,9 @@ document.addEventListener('click', async event => {
     if (button.dataset.room) return await selectRoom(button.dataset.room);
     if (button.dataset.alertRoom) { dismiss(); return await selectRoom(button.dataset.alertRoom); }
     if (button.dataset.openImage) { openMessageImage(button.dataset.openImage); return; }
-    if (button.dataset.messageMenu) {
-      const menu = button.parentElement.querySelector('[data-message-popover]'); const opening = menu.classList.contains('hidden');
-      closeMessageMenus(opening ? menu : null); return;
-    }
     if (button.dataset.deleteMessage) {
       if (!confirm('Delete this message for everyone? This cannot be undone.')) return;
-      closeMessageMenus(); const result = await api(`/api/rooms/${state.roomId}/messages/${button.dataset.deleteMessage}`, { method: 'DELETE' });
+      const result = await api(`/api/rooms/${state.roomId}/messages/${button.dataset.deleteMessage}`, { method: 'DELETE' });
       const message = state.messages.find(item => item.id === button.dataset.deleteMessage);
       if (message) Object.assign(message, { body: '', attachment_id: null, attachment_expired: false,
         deleted_at: result.deletedAt || Date.now(), deleted_by_me: true, delivery: undefined });

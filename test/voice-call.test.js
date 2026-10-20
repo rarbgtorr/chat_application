@@ -74,8 +74,9 @@ test('camera send arrow attaches the captured photo and submits it immediately',
 test('incoming ringtone repeats for one call and stops when the call changes state',()=>{
  const rings=[],intervals=new Map();let next=1;
  const timers={setInterval(fn,ms){const id=next++;intervals.set(id,{fn,ms});return id;},clearInterval(id){intervals.delete(id);}};
- const ringtone=new IncomingRingtone({ring:()=>rings.push('ring'),timers,interval:1400});ringtone.start('call-one');
+ let stopped=0;
+ const ringtone=new IncomingRingtone({ring:()=>{rings.push('ring');return()=>stopped++;},timers,interval:1400});ringtone.start('call-one');
  assert.equal(rings.length,1);assert.equal(intervals.size,1);assert.equal([...intervals.values()][0].ms,1400);
  ringtone.start('call-one');assert.equal(rings.length,1);assert.equal(intervals.size,1);intervals.values().next().value.fn();assert.equal(rings.length,2);
- ringtone.stop();assert.equal(intervals.size,0);assert.equal(ringtone.callId,null);
+ ringtone.stop();assert.equal(intervals.size,0);assert.equal(ringtone.callId,null);assert.equal(stopped,2);
 });

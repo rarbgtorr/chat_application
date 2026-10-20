@@ -32,8 +32,9 @@ export function sendCapturedPhoto(preview,file,document){
 
 export class IncomingRingtone {
   constructor({ring,timers=globalThis,interval=1400}){Object.assign(this,{ring,timers,interval});this.callId=null;this.timer=null;}
-  start(callId){if(this.callId===callId&&this.timer!==null)return;this.stop();this.callId=callId;this.ring();this.timer=this.timers.setInterval(()=>this.ring(),this.interval);}
-  stop(){if(this.timer!==null)this.timers.clearInterval(this.timer);this.timer=null;this.callId=null;}
+  play(){if(typeof this.cancelRing==='function')this.cancelRing();this.cancelRing=this.ring();}
+  start(callId){if(this.callId===callId&&this.timer!==null)return;this.stop();this.callId=callId;this.play();this.timer=this.timers.setInterval(()=>this.play(),this.interval);}
+  stop(){if(this.timer!==null)this.timers.clearInterval(this.timer);if(typeof this.cancelRing==='function')this.cancelRing();this.cancelRing=null;this.timer=null;this.callId=null;}
 }
 
 export function installMedia({api,post,config,room,preview,modal,dismiss,toast,recording,beep}){

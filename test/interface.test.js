@@ -172,13 +172,10 @@ test('message deletion controls follow sender ownership and admin permissions', 
     { id: 'staff-other', seq: 2, body: 'Staff', sender: 'Wingfactor Support', sender_role: 'agent', own: false, created_at: Date.now() },
   );
   await client.window.refresh();
-  assert.ok(client.document.querySelector('[data-message-menu="client-own"]'));
-  assert.equal(client.document.querySelector('[data-message-menu="client-own"]').closest('.bubble'), null);
   assert.ok(client.document.querySelector('[data-delete-message="client-own"]'));
-  assert.ok(client.document.querySelector('[data-delete-message="client-own"]').closest('.message-menu-popover').classList.contains('hidden'));
+  assert.ok(client.document.querySelector('[data-delete-message="client-own"]').closest('.bubble'));
+  assert.equal(client.document.querySelector('[data-message-menu]'), null);
   assert.equal(client.document.querySelector('[data-delete-message="staff-other"]'), null);
-  client.document.querySelector('[data-message-menu="client-own"]').click();
-  assert.equal(client.document.querySelector('[data-delete-message="client-own"]').closest('.message-menu-popover').classList.contains('hidden'), false);
   client.document.querySelector('[data-delete-message="client-own"]').click();
   await until(() => client.messages.find(message => message.id === 'client-own')?.deleted_at && !client.document.querySelector('[data-delete-message="client-own"]'));
   assert.match(client.document.querySelector('.deleted-message').textContent, /You deleted this message/);
