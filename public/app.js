@@ -313,23 +313,24 @@ function playCallRingtone() {
   const play = () => {
     if (cancelled || !state.sound || state.sound.state !== 'running') return;
     const now = state.sound.currentTime;
-    for (const offset of [0, .58]) {
-      for (const frequency of [660, 880]) {
+    // Two short marimba phrases with a pause: a phone melody, not an alarm.
+    const notes = [[0, 392], [.18, 523.25], [.36, 659.25], [.54, 523.25], [.96, 440], [1.14, 587.33], [1.32, 698.46], [1.5, 587.33]];
+    for (const [offset, frequency] of notes) {
+      for (const [partial, volume, decay] of [[1, .28, .5], [2.76, .04, .22], [4.1, .009, .12]]) {
         const oscillator = state.sound.createOscillator(), gain = state.sound.createGain();
         nodes.push(oscillator); oscillator.connect(gain); gain.connect(state.sound.destination);
-        oscillator.frequency.value = frequency;
+        oscillator.type = 'sine'; oscillator.frequency.value = frequency * partial;
         const start = now + offset;
-        gain.gain.setValueAtTime(0, start);
-        gain.gain.linearRampToValueAtTime(.22, start + .025);
-        gain.gain.setValueAtTime(.22, start + .34);
-        gain.gain.linearRampToValueAtTime(0, start + .4);
+        gain.gain.setValueAtTime(.0001, start);
+        gain.gain.linearRampToValueAtTime(volume, start + .008);
+        gain.gain.exponentialRampToValueAtTime(.0001, start + decay);
         oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
-        oscillator.start(start); oscillator.stop(start + .4);
+        oscillator.start(start); oscillator.stop(start + decay + .02);
       }
     }
   };
   if (state.sound?.state === 'running') play();
-  else if (state.sound) void state.sound.resume().then(play).catch(() => {});
+  else void unlockCallSound().then(allowed => { if (allowed) play(); });
   return () => { cancelled = true; nodes.forEach(node => { try { node.stop(); } catch {} }); };
 }
 async function boot() {
@@ -382,7 +383,7 @@ async function enablePush() {
 }
 function showSettings() {
   const permission = 'Notification' in window ? Notification.permission : 'unsupported';
-  modal('Your settings', `<p class="modal-description">Keep alerts enabled on every device you use for support.</p><div class="section-label">Notifications on this device</div><div class="settings-row"><span class="tag ${permission === 'granted' ? '' : 'waiting'}">${esc(permission === 'granted' && state.push.devices ? 'Enabled' : permission === 'denied' ? 'Blocked in browser' : 'Not enabled')}</span><button class="secondary" data-action="enable-push">Enable notifications</button><button class="secondary" data-action="test-push">Send test alert</button></div><div class="settings-note">Allow browser notifications and sound. Check your phone’s notification and battery settings if alerts are delayed. Delivery needs an internet connection.<br>${state.push.enabled ? '' : '<strong>Server setup needed:</strong> set PUSH_CONTACT before using background alerts.'}</div>${state.calls ? '<div class="section-label">Call ringtone</div><div class="settings-row"><button class="secondary" data-action="test-ringtone">Enable / test ringtone</button></div><div class="settings-note">Tap once after opening this app to allow call sound. Keep the app running for a repeating ringtone. If your browser closes or pauses the app, calls use your device’s notification sound.</div>' : ''}${state.me.role !== 'client' ? `<div class="section-label">Your account</div><button class="secondary" data-action="password">Change password</button><div class="settings-note">You stay signed in on this device. Signing out, an admin revoking access, or clearing browser data will require a new login.<br>Unanswered client messages: teammate reminder at 5 minutes, admin alert at 10 minutes.</div><div class="modal-actions"><button class="danger" data-action="logout">Sign out of this device</button></div>` : ''}`);
+  modal('Your settings', `<p class="modal-description">Keep alerts enabled on every device you use for support.</p><div class="section-label">Notifications on this device</div><div class="settings-row"><span class="tag ${permission === 'granted' ? '' : 'waiting'}">${esc(permission === 'granted' && state.push.devices ? 'Enabled' : permission === 'denied' ? 'Blocked in browser' : 'Not enabled')}</span><button class="secondary" data-action="enable-push">Enable notifications</button><button class="secondary" data-action="test-push">Send test alert</button></div><div class="settings-note">Allow browser notifications and sound. Check your phone’s notification and battery settings if alerts are delayed. Delivery needs an internet connection.<br>${state.push.enabled ? '' : '<strong>Server setup needed:</strong> set PUSH_CONTACT before using background alerts.'}</div>${state.me.role !== 'client' ? `<div class="section-label">Your account</div><button class="secondary" data-action="password">Change password</button><div class="settings-note">You stay signed in on this device. Signing out, an admin revoking access, or clearing browser data will require a new login.<br>Unanswered client messages: teammate reminder at 5 minutes, admin alert at 10 minutes.</div><div class="modal-actions"><button class="danger" data-action="logout">Sign out of this device</button></div>` : ''}`);
 }
 async function showTeam() {
   state.users = await api('/api/users');
@@ -618,10 +619,6 @@ document.addEventListener('click', async event => {
       case 'settings': showSettings(); break;
       case 'enable-push': await enablePush(); break;
       case 'test-push': toast((await post('/api/push/test')).message); break;
-      case 'test-ringtone':
-        if (state.media?.active()) throw new Error('Finish your call before testing the ringtone.');
-        if (!await unlockCallSound()) throw new Error('Call sound is blocked. Allow sound in your browser settings and try again.');
-        playCallRingtone(); break;
       case 'team': await showTeam(); break;
       case 'alerts': await showAlerts(); break;
       case 'clear-alerts': await post('/api/alerts/read'); dismiss(); await refresh(); break;

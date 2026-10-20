@@ -76,8 +76,8 @@ test('incoming ringtone repeats for one call and stops when the call changes sta
  const rings=[],intervals=new Map();let next=1;
  const timers={setInterval(fn,ms){const id=next++;intervals.set(id,{fn,ms});return id;},clearInterval(id){intervals.delete(id);}};
  let stopped=0;
- const ringtone=new IncomingRingtone({ring:()=>{rings.push('ring');return()=>stopped++;},timers,interval:1400});ringtone.start('call-one');
- assert.equal(rings.length,1);assert.equal(intervals.size,1);assert.equal([...intervals.values()][0].ms,1400);
+ const ringtone=new IncomingRingtone({ring:()=>{rings.push('ring');return()=>stopped++;},timers});ringtone.start('call-one');
+ assert.equal(rings.length,1);assert.equal(intervals.size,1);assert.equal([...intervals.values()][0].ms,3600);
  ringtone.start('call-one');assert.equal(rings.length,1);assert.equal(intervals.size,1);intervals.values().next().value.fn();assert.equal(rings.length,2);
  ringtone.stop();assert.equal(intervals.size,0);assert.equal(ringtone.callId,null);assert.equal(stopped,2);
 });
