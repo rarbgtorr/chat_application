@@ -10,11 +10,11 @@ const styles = await readFile(new URL('../public/style.css', import.meta.url), '
 const serviceWorker = await readFile(new URL('../public/sw.js', import.meta.url), 'utf8');
 const callFix = await readFile(new URL('../supabase/migrations/20261019141500_fix_call_finish_ambiguity.sql', import.meta.url), 'utf8');
 const receiptMigration = await readFile(new URL('../supabase/migrations/20261019145343_whatsapp_receipts_and_assigned_call_ringing.sql', import.meta.url), 'utf8');
-const deleteMigration = await readFile(new URL('../supabase/migrations/20261020092500_message_delete_for_everyone.sql', import.meta.url), 'utf8');
+const deleteMigration = await readFile(new URL('../supabase/migrations/20261020095600_soft_delete_message_tombstones.sql', import.meta.url), 'utf8');
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
-async function ui(t, { role = 'agent', link = false, uploadGate = null } = {}) {
+async function ui(t, { role = 'agent', link = false, uploadGate = null, messageGate = null } = {}) {
   const roomId = 'room123'; const calls = []; const messages = [];
   const dom = new JSDOM(html, { url: `http://localhost:3000/${role === 'client' ? `c/${roomId}${link ? '#key=private-secret' : ''}` : '?room=room123'}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
@@ -37,13 +37,15 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null } = {}) {
     else if (path.endsWith('/upload') && options.method === 'POST') {
       uploadedFile = options.body; if (uploadGate) await uploadGate; result = { attachmentId: 'attachment123' };
     } else if (path.endsWith('/messages') && options.method === 'POST') {
+      if (messageGate) await messageGate;
       const m = { id: `m${messages.length}`, seq: messages.length + 1, body: data.body, sender: 'Wingfactor Support', own: true, sender_role: role, created_at: Date.now(),
         delivery: 'sent',
         ...(data.attachmentId ? { attachment_id: data.attachmentId, filename: uploadedFile.name, mime: uploadedFile.type, size: uploadedFile.size } : {}) };
       messages.push(m); result = { id: m.id, seq: m.seq };
     } else if (/\/messages\/[\w-]+$/.test(path) && options.method === 'DELETE') {
-      const id = path.split('/').at(-1); const index = messages.findIndex(message => message.id === id);
-      if (index >= 0) messages.splice(index, 1); result = { ok: true };
+      const id = path.split('/').at(-1); const message = messages.find(item => item.id === id); const deletedAt = Date.now();
+      if (message) Object.assign(message, { body: '', attachment_id: null, deleted_at: deletedAt, deleted_by_me: true, delivery: undefined });
+      result = { ok: true, deletedAt };
     } else if (path.includes('/messages')) result = { messages: [...messages], hasMore: false };
     else if (path === '/api/client/session') result = { roomId };
     else if (path === '/api/alerts') result = [];
@@ -130,6 +132,19 @@ test('sending through the composer renders text safely and clears the sent draft
   assert.ok(send.data.nonce); assert.equal(send.data.body, '<img src=x onerror=alert(1)> Hello');
 });
 
+test('text messages appear immediately without putting the composer into a sending stage', async t => {
+  let finishSend; const messageGate = new Promise(resolve => { finishSend = resolve; });
+  const f = await ui(t, { role: 'client', messageGate }); const input = f.document.querySelector('#message-input');
+  input.value = 'This should appear instantly';
+  f.document.querySelector('#message-form').requestSubmit();
+  const pending = f.document.querySelector('.pending-message');
+  assert.ok(pending); assert.match(pending.textContent, /This should appear instantly/);
+  assert.ok(pending.querySelector('.delivery-mark.sending'));
+  assert.equal(input.value, ''); assert.match(f.document.querySelector('#send-button').textContent, /Send/);
+  assert.equal(f.document.querySelector('#send-button').disabled, false);
+  finishSend(); await until(() => f.document.querySelector('.message:not(.pending-message)'));
+});
+
 test('client, teammate, and admin outgoing messages show WhatsApp delivery ticks', async t => {
   const f = await ui(t, { role: 'client' });
   const message = { id: 'receipt-message', seq: 1, body: 'Are you there?', sender: 'Client', sender_role: 'client', own: true, created_at: Date.now(), delivery: 'sent' };
@@ -157,10 +172,16 @@ test('message deletion controls follow sender ownership and admin permissions', 
     { id: 'staff-other', seq: 2, body: 'Staff', sender: 'Wingfactor Support', sender_role: 'agent', own: false, created_at: Date.now() },
   );
   await client.window.refresh();
+  assert.ok(client.document.querySelector('[data-message-menu="client-own"]'));
+  assert.equal(client.document.querySelector('[data-message-menu="client-own"]').closest('.bubble'), null);
   assert.ok(client.document.querySelector('[data-delete-message="client-own"]'));
+  assert.ok(client.document.querySelector('[data-delete-message="client-own"]').closest('.message-menu-popover').classList.contains('hidden'));
   assert.equal(client.document.querySelector('[data-delete-message="staff-other"]'), null);
+  client.document.querySelector('[data-message-menu="client-own"]').click();
+  assert.equal(client.document.querySelector('[data-delete-message="client-own"]').closest('.message-menu-popover').classList.contains('hidden'), false);
   client.document.querySelector('[data-delete-message="client-own"]').click();
-  await until(() => !client.messages.some(message => message.id === 'client-own') && !client.document.querySelector('[data-delete-message="client-own"]'));
+  await until(() => client.messages.find(message => message.id === 'client-own')?.deleted_at && !client.document.querySelector('[data-delete-message="client-own"]'));
+  assert.match(client.document.querySelector('.deleted-message').textContent, /You deleted this message/);
   assert.equal(client.document.querySelector('[data-delete-message="client-own"]'), null);
 
   const admin = await ui(t, { role: 'admin' });
@@ -168,7 +189,14 @@ test('message deletion controls follow sender ownership and admin permissions', 
   await admin.window.refresh();
   assert.ok(admin.document.querySelector('[data-delete-message="client-message"]'));
   assert.match(deleteMigration, /role_name<>'admin' and m\.sender_id<>who/);
+  assert.match(deleteMigration, /update public\.wc_messages set body='',attachment_id=null,deleted_at=/);
   assert.match(deleteMigration, /revoke all on function public\.wc_message_delete/);
+
+  const teammate = await ui(t, { role: 'agent' });
+  teammate.messages.push({ id: 'deleted-by-client', seq: 1, body: '', sender: 'Visible Client', sender_role: 'client', own: false,
+    created_at: Date.now(), deleted_at: Date.now(), deleted_by_me: false });
+  await teammate.window.refresh();
+  assert.match(teammate.document.querySelector('.deleted-message').textContent, /This message was deleted/);
 });
 
 test('opening a client camera photo gives staff a full preview and starts a device download', async t => {

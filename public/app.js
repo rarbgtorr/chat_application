@@ -20,6 +20,8 @@ const icons = {
   file: '<path d="M14 2H5v20h14V7l-5-5ZM14 2v6h5M8 13h8M8 17h5"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  moreVertical: '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
+  deleted: '<circle cx="12" cy="12" r="9"/><path d="m6 6 12 12"/>',
 };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.chat}</svg>`;
 const iconButton = (name, action, title) => `<button class="icon-btn" type="button" data-action="${action}" aria-label="${title}" title="${title}">${icon(name)}</button>`;
@@ -40,8 +42,8 @@ async function api(path, options = {}) {
 const post = (path, data = {}) => api(path, { method: 'POST', body: JSON.stringify(data) });
 const formatTime = value => value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 const formatDay = value => new Date(value).toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
-function deliveryMark(status, failed = false) {
-  if (failed) return `<button type="button" class="delivery-retry" data-action="retry-send" aria-label="Retry sending" title="Retry sending"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8"/><path d="M10 5v6M10 15h.01"/></svg></button>`;
+function deliveryMark(status, failed = false, pendingId = '') {
+  if (failed) return `<button type="button" class="delivery-retry" data-action="retry-send" data-pending-id="${esc(pendingId)}" aria-label="Retry sending" title="Retry sending"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8"/><path d="M10 5v6M10 15h.01"/></svg></button>`;
   if (status === 'sending') return `<span class="delivery-mark sending" aria-label="Sending" title="Sending"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M10 5.5V10l3 2"/></svg></span>`;
   const double = status === 'delivered' || status === 'read';
   return `<span class="delivery-mark ${status}" aria-label="${status === 'read' ? 'Read' : status === 'delivered' ? 'Delivered' : 'Sent'}" title="${status === 'read' ? 'Read' : status === 'delivered' ? 'Delivered' : 'Sent'}"><svg viewBox="0 0 20 14" aria-hidden="true"><path d="M1.5 7.5 5 11l7.5-8.5"/>${double ? '<path d="M7 7.5 10.5 11 18 2.5"/>' : ''}</svg></span>`;
@@ -52,6 +54,10 @@ const clientName = room => room?.private?.name || room?.client?.name || room?.co
 const clientNotes = room => room?.private?.notes ?? room?.client?.notes ?? '';
 function modal(title, content) { state.media?.closeCamera(); $('#modal').classList.remove('camera-dialog'); $('#modal-body').innerHTML = `<div class="modal-head"><h2>${esc(title)}</h2>${iconButton('close', 'close-modal', 'Close')}</div>${content}`; if (!$('#modal').open) $('#modal').showModal(); }
 function dismiss() { $('#modal').close(); }
+function closeMessageMenus(except = null) {
+  document.querySelectorAll('[data-message-popover]').forEach(menu => menu.classList.toggle('hidden', menu !== except));
+  document.querySelectorAll('[data-message-menu]').forEach(button => button.setAttribute('aria-expanded', String(button.parentElement?.querySelector('[data-message-popover]') === except)));
+}
 function initials(name) { return esc(name.split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase()); }
 function cameraPhoto(message) { return message.sender_role === 'client' && /^photo-\d+\.jpe?g$/i.test(message.filename || ''); }
 function openMessageImage(messageId) {
@@ -120,9 +126,13 @@ function renderMessages(prepend = false) {
   const rows = messages.map(message => {
     const day = formatDay(message.created_at); let divider = '';
     if (day !== lastDay) { lastDay = day; divider = `<div class="day-divider" data-key="day-${esc(day)}">${esc(day)}</div>`; }
-    let attachment = '';
-    if (message.localUrl) {
+    const deleted = Boolean(message.deleted_at); let attachment = '';
+    if (deleted) {
+      attachment = '';
+    } else if (message.localUrl) {
       attachment = `<div class="attachment image-attachment pending-attachment"><img src="${esc(message.localUrl)}" alt="${esc(message.filename)}"></div>`;
+    } else if (message.pending && message.filename) {
+      attachment = `<div class="attachment pending-attachment">${icon('file')} <span>${esc(message.filename)}</span></div>`;
     } else if (message.attachment_id && message.attachment_expired) {
       attachment = `<div class="attachment"><span class="small">Attachment expired · deleted after 7 days</span></div>`;
     } else if (message.attachment_id) {
@@ -131,15 +141,16 @@ function renderMessages(prepend = false) {
       const preview = image ? `<button type="button" class="image-open" data-open-image="${message.id}" aria-label="Open ${esc(message.filename || 'photo')}"><img src="${src}" alt="${esc(message.filename)}" loading="lazy"></button>` : message.mime?.startsWith('video/') ? `<video src="${src}" controls preload="metadata"></video>` : message.mime?.startsWith('audio/') ? `<audio src="${src}" controls preload="metadata"></audio>` : '';
       attachment = image ? `<div class="attachment image-attachment">${preview}</div>` : `<div class="attachment">${preview}<a href="${src}?download=1" download>${icon('file')} ${esc(message.filename)}</a><small>${(message.size / 1024 / 1024).toFixed(2)} MB · Download</small></div>`;
     }
-    const receipt = message.own && message.sender_role !== 'system';
+    const receipt = message.own && !deleted && message.sender_role !== 'system';
     const delivery = message.pending ? message.failed ? 'failed' : message.serverId ? 'sent' : 'sending' : message.delivery || 'sent';
-    const imageMessage = Boolean(message.localUrl || (message.attachment_id && !message.attachment_expired && message.mime?.startsWith('image/')));
-    const key = message.pending ? `${message.id}-${delivery}` : `${message.id}-${Boolean(message.attachment_expired)}-${receipt ? delivery : ''}`;
+    const imageMessage = !deleted && Boolean(message.localUrl || (message.attachment_id && !message.attachment_expired && message.mime?.startsWith('image/')));
+    const key = message.pending ? `${message.id}-${delivery}` : `${message.id}-${Boolean(message.attachment_expired)}-${message.deleted_at || ''}-${message.deleted_by_me || ''}-${receipt ? delivery : ''}`;
     const meta = message.own ? '' : `<div class="message-meta"><span>${esc(message.sender)}</span><time>${formatTime(message.created_at)}</time></div>`;
-    const status = `<span class="message-status"><time>${formatTime(message.created_at)}</time>${receipt ? deliveryMark(delivery, message.failed) : ''}</span>`;
-    const canDelete = !message.pending && (message.own || state.me.role === 'admin');
-    const remove = canDelete ? `<button type="button" class="message-delete" data-delete-message="${message.id}" aria-label="Delete for everyone" title="Delete for everyone">${icon('trash')}</button>` : '';
-    return `${divider}<article data-key="${key}" class="message ${message.own ? 'own' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="bubble">${remove}${message.body ? `<span class="message-body">${esc(message.body)}</span>` : ''}${attachment}${status}</div></article>`;
+    const status = `<span class="message-status"><time>${formatTime(message.created_at)}</time>${receipt ? deliveryMark(delivery, message.failed, message.id) : ''}</span>`;
+    const canDelete = !message.pending && !deleted && (message.own || state.me.role === 'admin');
+    const menu = canDelete ? `<div class="message-menu"><button type="button" class="message-more" data-message-menu="${message.id}" aria-label="Message options" title="Message options" aria-haspopup="menu" aria-expanded="false">${icon('moreVertical')}</button><div class="message-menu-popover hidden" data-message-popover="${message.id}" role="menu"><button type="button" data-delete-message="${message.id}" role="menuitem">${icon('trash')} Delete for everyone</button></div></div>` : '';
+    const content = deleted ? `<span class="deleted-message">${icon('deleted')}<em>${message.deleted_by_me ? 'You deleted this message' : 'This message was deleted'}</em></span>` : `${message.body ? `<span class="message-body">${esc(message.body)}</span>` : ''}${attachment}`;
+    return `${divider}<article data-key="${key}" class="message ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="message-shell"><div class="bubble">${content}${status}</div>${menu}</div></article>`;
   }).join('');
   const template = document.createElement('template');
   template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(clientName(room))}. Send a message to get started.`}</p></div>`}`;
@@ -169,7 +180,7 @@ async function loadMessages(roomId, before) {
   const result = await api(`/api/rooms/${roomId}/messages${before ? `?before=${before}` : ''}`);
   if (state.roomId !== roomId) return;
   const previousLast = state.messages.at(-1)?.seq;
-  const oldSignature = state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.delivery || ''}`).join(',');
+  const oldSignature = state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.deleted_at || ''}:${m.deleted_by_me || ''}:${m.delivery || ''}`).join(',');
   if (before) state.messages = [...result.messages, ...state.messages];
   else {
     // Retain previously loaded pages when realtime refresh fetches the most recent page.
@@ -180,9 +191,9 @@ async function loadMessages(roomId, before) {
   const savedIds = new Set(state.messages.map(message => message.id));
   state.pendingMessages = state.pendingMessages.filter(message => {
     if (!message.serverId || !savedIds.has(message.serverId)) return true;
-    URL.revokeObjectURL(message.localUrl); return false;
+    if (message.localUrl) URL.revokeObjectURL(message.localUrl); return false;
   });
-  if (oldSignature !== state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.delivery || ''}`).join(',') || !$('#messages')?.querySelector('.message')) renderMessages(Boolean(before));
+  if (oldSignature !== state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.deleted_at || ''}:${m.deleted_by_me || ''}:${m.delivery || ''}`).join(',') || !$('#messages')?.querySelector('.message')) renderMessages(Boolean(before));
   if (!before && previousLast && state.messages.at(-1)?.seq > previousLast && !state.messages.at(-1).own) beep();
   if (!document.hidden && state.messages.length) {
     await post(`/api/rooms/${roomId}/read`, { seq: state.messages.at(-1).seq });
@@ -322,7 +333,7 @@ async function showAlerts() {
 function removePendingMessage(id, rerender = true) {
   const pending = state.pendingMessages.find(message => message.id === id);
   if (!pending) return;
-  URL.revokeObjectURL(pending.localUrl);
+  if (pending.localUrl) URL.revokeObjectURL(pending.localUrl);
   state.pendingMessages = state.pendingMessages.filter(message => message.id !== id);
   if (rerender) renderMessages();
 }
@@ -335,10 +346,27 @@ function previewFile(file, sendImmediately = false) {
   if (sendImmediately) {
     const pending = { id: `pending-${crypto.randomUUID()}`, roomId: state.roomId, created_at: Date.now(), own: true,
       sender: state.me.name, sender_role: state.me.role, body: '', filename: file.name, mime: file.type, size: file.size,
-      localUrl: URL.createObjectURL(file), pending: true, failed: false, serverId: null };
+      localUrl: URL.createObjectURL(file), file, nonce: crypto.randomUUID(), pending: true, failed: false, serverId: null };
     state.pendingMessages.push(pending); form.dataset.pendingId = pending.id; renderMessages();
   }
   return true;
+}
+async function sendPendingMessage(pending) {
+  if (!pending || pending.sending || pending.serverId) return;
+  pending.sending = true; pending.failed = false; renderMessages();
+  try {
+    if (pending.file && !pending.attachmentId) {
+      const uploaded = await api(`/api/rooms/${pending.roomId}/upload`, { method: 'POST', body: pending.file,
+        headers: { 'X-Filename': encodeURIComponent(pending.file.name), 'Content-Type': pending.file.type || 'application/octet-stream' } });
+      pending.attachmentId = uploaded.attachmentId;
+    }
+    const sent = await post(`/api/rooms/${pending.roomId}/messages`, { body: pending.body,
+      attachmentId: pending.attachmentId || null, nonce: pending.nonce });
+    pending.serverId = sent.id; pending.failed = false; pending.file = null; renderMessages();
+    await refresh();
+  } catch (error) {
+    pending.failed = true; renderMessages(); toast(error.message);
+  } finally { pending.sending = false; }
 }
 async function acknowledgeDeliveries() {
   if (!state.me || !state.rooms.length) return;
@@ -368,7 +396,7 @@ async function record() {
 document.addEventListener('submit', async event => {
   const form = event.target; event.preventDefault();
   const button = form.querySelector('[type="submit"]'); const oldLabel = button?.innerHTML;
-  if (button) { button.disabled = true; button.textContent = form.id === 'message-form' ? 'Sending…' : 'Saving…'; }
+  if (button && form.id !== 'message-form') { button.disabled = true; button.textContent = 'Saving…'; }
   const values = Object.fromEntries(new FormData(form));
   try {
     if (form.id === 'login-form') { await post('/api/login', values); await boot(); }
@@ -388,22 +416,19 @@ document.addEventListener('submit', async event => {
       if (state.recorder?.state === 'recording') throw new Error('Stop the voice recording before sending.');
       const input = $('#message-input'); const value = input.value.trim(); const roomId = state.roomId;
       if (!value && !state.file) return;
-      const pending = state.pendingMessages.find(message => message.id === form.dataset.pendingId);
-      if (pending?.failed) { pending.failed = false; renderMessages(); }
-      // Keep the same nonce and attachment on retry when the server response is lost.
-      const signature = `${value}|${state.file?.name || ''}|${state.file?.size || ''}`;
-      if (form.dataset.signature !== signature) { form.dataset.signature = signature; form.dataset.nonce = crypto.randomUUID(); delete form.dataset.attachment; }
-      if (state.file && !form.dataset.attachment) {
-        const uploaded = await api(`/api/rooms/${roomId}/upload`, { method: 'POST', body: state.file,
-          headers: { 'X-Filename': encodeURIComponent(state.file.name), 'Content-Type': state.file.type || 'application/octet-stream' } });
-        form.dataset.attachment = uploaded.attachmentId;
+      const file = state.file; let pending = state.pendingMessages.find(message => message.id === form.dataset.pendingId);
+      if (!pending) {
+        pending = { id: `pending-${crypto.randomUUID()}`, roomId, created_at: Date.now(), own: true,
+          sender: state.me.name, sender_role: state.me.role, body: value, filename: file?.name, mime: file?.type,
+          size: file?.size, localUrl: file?.type.startsWith('image/') ? URL.createObjectURL(file) : null,
+          file, nonce: crypto.randomUUID(), pending: true, failed: false, serverId: null };
+        state.pendingMessages.push(pending);
+      } else {
+        pending.body = value; pending.file ||= file; pending.nonce ||= crypto.randomUUID();
       }
-      const sent = await post(`/api/rooms/${roomId}/messages`, { body: value, attachmentId: form.dataset.attachment || null, nonce: form.dataset.nonce });
-      if (pending) { pending.serverId = sent.id; pending.failed = false; renderMessages(); }
       input.value = ''; state.file = null; $('#file-preview').classList.add('hidden');
-      delete form.dataset.signature; delete form.dataset.nonce; delete form.dataset.attachment; delete form.dataset.pendingId;
-      await refresh(); $('#messages').scrollTop = $('#messages').scrollHeight;
-      if (pending && state.pendingMessages.includes(pending)) renderMessages();
+      delete form.dataset.pendingId; renderMessages();
+      void sendPendingMessage(pending); return;
     }
   } catch (error) {
     if (form.id === 'message-form' && form.dataset.pendingId) {
@@ -412,9 +437,10 @@ document.addEventListener('submit', async event => {
     }
     const target = form.querySelector('.form-error') || $('#login-error');
     if (target) target.textContent = error.message; else toast(error.message);
-  } finally { if (button?.isConnected) { button.disabled = false; button.innerHTML = oldLabel; } }
+  } finally { if (button?.isConnected && form.id !== 'message-form') { button.disabled = false; button.innerHTML = oldLabel; } }
 });
 document.addEventListener('click', async event => {
+  if (!event.target.closest('.message-menu')) closeMessageMenus();
   const button = event.target.closest('button'); if (!button) return;
   try {
     if (!state.sound && window.AudioContext) { state.sound = new AudioContext(); }
@@ -422,10 +448,17 @@ document.addEventListener('click', async event => {
     if (button.dataset.room) return await selectRoom(button.dataset.room);
     if (button.dataset.alertRoom) { dismiss(); return await selectRoom(button.dataset.alertRoom); }
     if (button.dataset.openImage) { openMessageImage(button.dataset.openImage); return; }
+    if (button.dataset.messageMenu) {
+      const menu = button.parentElement.querySelector('[data-message-popover]'); const opening = menu.classList.contains('hidden');
+      closeMessageMenus(opening ? menu : null); return;
+    }
     if (button.dataset.deleteMessage) {
       if (!confirm('Delete this message for everyone? This cannot be undone.')) return;
-      await api(`/api/rooms/${state.roomId}/messages/${button.dataset.deleteMessage}`, { method: 'DELETE' });
-      state.messages = state.messages.filter(message => message.id !== button.dataset.deleteMessage); renderMessages();
+      closeMessageMenus(); const result = await api(`/api/rooms/${state.roomId}/messages/${button.dataset.deleteMessage}`, { method: 'DELETE' });
+      const message = state.messages.find(item => item.id === button.dataset.deleteMessage);
+      if (message) Object.assign(message, { body: '', attachment_id: null, attachment_expired: false,
+        deleted_at: result.deletedAt || Date.now(), deleted_by_me: true, delivery: undefined });
+      renderMessages();
       await refresh(); toast('Message deleted for everyone.'); return;
     }
     if (button.dataset.filter) {
@@ -466,7 +499,7 @@ document.addEventListener('click', async event => {
         const form = $('#message-form'); if (form?.dataset.pendingId) removePendingMessage(form.dataset.pendingId);
         if (form) delete form.dataset.pendingId; state.file = null; $('#file-preview').classList.add('hidden'); break;
       }
-      case 'retry-send': if (!$('#send-button')?.disabled && state.file) $('#message-form')?.requestSubmit(); break;
+      case 'retry-send': void sendPendingMessage(state.pendingMessages.find(message => message.id === button.dataset.pendingId)); break;
       case 'record': if(state.media?.active())throw new Error('Finish your call before recording a voice note.'); await record(); break;
       case 'earlier': if (state.messages.length) await loadMessages(state.roomId, state.messages[0].seq); break;
       case 'logout': if (!confirm('Sign out on this device? Its support notifications will stop.')) break;

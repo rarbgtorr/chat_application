@@ -72,12 +72,12 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
  }
  async function summary(a,room){
   const [last,marker,assigned,cycle]=await Promise.all([
-   result(table('messages').select('body,created_at,sender_role,attachment_id').eq('room_id',room.id).order('seq',{ascending:false}).limit(1)),
+   result(table('messages').select('body,created_at,sender_role,attachment_id,deleted_at').eq('room_id',room.id).order('seq',{ascending:false}).limit(1)),
    result(table('reads').select('seq').eq('room_id',room.id).eq('subject',a.role==='client'?'client:'+room.id:a.id)),agents(room.id),one('cycles','room_id',room.id)]);
-  let unread=table('messages').select('seq',{count:'exact',head:true}).eq('room_id',room.id).gt('seq',marker[0]?.seq||0);
+  let unread=table('messages').select('seq',{count:'exact',head:true}).eq('room_id',room.id).is('deleted_at',null).gt('seq',marker[0]?.seq||0);
   unread=a.role==='client'?unread.neq('sender_role','client'):unread.eq('sender_role','client');
   const count=await unread;
-  const r={...room,last:last[0]?{...last[0],body:last[0].body||'Attachment'}:null,unread:count.count||0,agents:assigned,waitingSince:cycle?.first_at||null};
+  const r={...room,last:last[0]?{...last[0],body:last[0].deleted_at?'This message was deleted':last[0].body||'Attachment'}:null,unread:count.count||0,agents:assigned,waitingSince:cycle?.first_at||null};
   if(a.role!=='client'){
    const details=await one('contacts','room_id',room.id);
    if(a.role==='admin')r.private=details;
@@ -139,12 +139,12 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
     const d=await json(req);check(Array.isArray(d.roomIds)&&d.roomIds.length<=500&&d.roomIds.every(x=>typeof x==='string'&&/^[\w-]{10,100}$/.test(x)),400,'Invalid conversations.');const changed=[];
     for(const roomId of new Set(d.roomIds)){
      if(a.role==='client'){
-      if(roomId!==a.roomId)continue;const latest=await result(table('messages').select('seq').eq('room_id',roomId).in('sender_role',['admin','agent']).order('seq',{ascending:false}).limit(1));const seq=latest[0]?.seq||0;if(!seq)continue;
+      if(roomId!==a.roomId)continue;const latest=await result(table('messages').select('seq').eq('room_id',roomId).is('deleted_at',null).in('sender_role',['admin','agent']).order('seq',{ascending:false}).limit(1));const seq=latest[0]?.seq||0;if(!seq)continue;
       const subject='delivered:client:'+roomId;const old=await result(table('reads').select('seq').eq('room_id',roomId).eq('subject',subject));if(seq>(old[0]?.seq||0)){await result(table('reads').upsert({room_id:roomId,subject,seq}));changed.push(roomId);}continue;
      }
      const room=await one('rooms','id',roomId);if(!room)continue;const assigned=await agents(roomId);
      const eligible=a.role==='agent'?assigned.some(x=>x.id===a.id):assigned.length===0;if(!eligible)continue;
-     const latest=await result(table('messages').select('seq').eq('room_id',roomId).eq('sender_role','client').order('seq',{ascending:false}).limit(1));const seq=latest[0]?.seq||0;if(!seq)continue;
+     const latest=await result(table('messages').select('seq').eq('room_id',roomId).is('deleted_at',null).eq('sender_role','client').order('seq',{ascending:false}).limit(1));const seq=latest[0]?.seq||0;if(!seq)continue;
      const subject='delivered:'+a.id;const old=await result(table('reads').select('seq').eq('room_id',roomId).eq('subject',subject));if(seq>(old[0]?.seq||0)){await result(table('reads').upsert({room_id:roomId,subject,seq}));changed.push(roomId);}
     }
     await Promise.all(changed.map(signal));return reply({ok:true});
@@ -168,7 +168,7 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
    const messageMatch=/^\/rooms\/([\w-]+)\/messages\/([\w-]+)$/.exec(path);
    if(messageMatch&&method==='DELETE'){
     const roomId=messageMatch[1],messageId=messageMatch[2];await access(a,roomId);
-    await rpc('message_delete',{p_token:a.sessionHash,p_room:roomId,p_message:messageId});await cleanup();waitUntil(worker(config));return reply({ok:true});
+    await rpc('message_delete',{p_token:a.sessionHash,p_room:roomId,p_message:messageId});await cleanup();waitUntil(worker(config));return reply({ok:true,deletedAt:clock()});
    }
    const rm=/^\/rooms\/([\w-]+)(?:\/(messages|read|upload|link|revoke))?$/.exec(path);
    if(rm){const roomId=rm[1],action=rm[2];const room=await access(a,roomId);
@@ -188,7 +188,7 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
      const rows=await result(table('messages').select('*').eq('room_id',roomId).lt('seq',before).order('seq',{ascending:false}).limit(100));
      const fileIds=rows.map(m=>m.attachment_id).filter(Boolean);const files=fileIds.length?await result(table('attachments').select('id,filename,mime,size,expired,expires_at').in('id',fileIds)):[];
      const clientLabel=a.role==='client'?room.code:(await one('contacts','room_id',roomId))?.name||room.code;const receipts=a.role==='client'?await receiptState(roomId):await clientReceiptState(roomId);
-     return reply({messages:rows.reverse().map(m=>{const f=files.find(f=>f.id===m.attachment_id);const own=m.sender_id===(a.role==='client'?roomId:a.id);const delivery=own&&m.sender_role!=='system'?(receipts.read>=m.seq?'read':receipts.delivered>=m.seq?'delivered':'sent'):undefined;return {...m,...(f?{filename:f.filename,mime:f.mime,size:f.size,attachment_expired:f.expired||f.expires_at<=clock()}:{}),...(delivery?{delivery}:{}),own,sender:m.sender_role==='client'?clientLabel:'Wingfactor Support'};}),hasMore:rows.length===100});
+     return reply({messages:rows.reverse().map(m=>{const f=files.find(f=>f.id===m.attachment_id);const viewerId=a.role==='client'?roomId:a.id;const own=m.sender_id===viewerId;const delivery=own&&!m.deleted_at&&m.sender_role!=='system'?(receipts.read>=m.seq?'read':receipts.delivered>=m.seq?'delivered':'sent'):undefined;const {deleted_by:deletedBy,...message}=m;return {...message,...(f?{filename:f.filename,mime:f.mime,size:f.size,attachment_expired:f.expired||f.expires_at<=clock()}:{}),...(delivery?{delivery}:{}),deleted_by_me:Boolean(m.deleted_at&&deletedBy===viewerId),own,sender:m.sender_role==='client'?clientLabel:'Wingfactor Support'};}),hasMore:rows.length===100});
     }
     if(action==='messages'&&method==='POST'){
      await limit('message:'+a.sessionHash,120);const d=await json(req);check(typeof d.nonce==='string'&&/^[\w-]{10,100}$/.test(d.nonce),400,'Missing message identifier.');const value=str(d.body,10000);check(value||d.attachmentId,400,'Write a message or attach a file.');

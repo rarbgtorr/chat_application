@@ -145,6 +145,11 @@ test('senders delete their own messages for everyone and administrators can dele
   assert.equal((await f.request('client', `/api/rooms/${room.roomId}/messages/${agentMessage.data.id}`, { method: 'DELETE' })).status, 403);
   assert.equal((await f.request('client', `/api/rooms/${room.roomId}/messages/${clientMessage.data.id}`, { method: 'DELETE' })).status, 200);
   assert.equal((await f.request('admin', `/api/rooms/${room.roomId}/messages/${agentMessage.data.id}`, { method: 'DELETE' })).status, 200);
+  const clientView = (await f.request('client', `/api/rooms/${room.roomId}/messages`)).data.messages;
+  assert.equal(clientView[0].body, ''); assert.ok(clientView[0].deleted_at); assert.equal(clientView[0].deleted_by_me, true);
+  assert.equal(clientView[1].deleted_by_me, false);
+  const adminView = (await f.request('admin', `/api/rooms/${room.roomId}/messages`)).data.messages;
+  assert.equal(adminView[0].deleted_by_me, false); assert.equal(adminView[1].deleted_by_me, true);
 
   const upload = await f.request('agent', `/api/rooms/${room.roomId}/upload`, { method: 'POST',
     body: Buffer.from('delete this image'), headers: { 'X-Filename': 'photo-1800000000000.jpg', 'Content-Type': 'image/jpeg' } });
@@ -153,7 +158,11 @@ test('senders delete their own messages for everyone and administrators can dele
   assert.equal((await f.request('agent', `/api/rooms/${room.roomId}/messages/${mediaMessage.data.id}`, { method: 'DELETE' })).status, 200);
   assert.equal((await f.request('agent', `/api/media/${upload.data.attachmentId}`)).status, 404);
   assert.equal(f.app.store.get('SELECT id FROM attachments WHERE id=?', upload.data.attachmentId), undefined);
-  assert.equal((await f.request('client', `/api/rooms/${room.roomId}/messages`)).data.messages.length, 0);
+  const history = (await f.request('client', `/api/rooms/${room.roomId}/messages`)).data.messages;
+  assert.equal(history.length, 3); assert.ok(history.every(message => message.deleted_at && message.body === ''));
+  assert.equal(history.some(message => message.attachment_id), false);
+  assert.equal(JSON.stringify(history).includes('Client-owned message'), false);
+  assert.equal(f.app.store.all('SELECT * FROM messages').length, 3);
 });
 
 test('5-minute reminder and 10-minute admin escalation use the first unanswered message', async t => {

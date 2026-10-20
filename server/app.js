@@ -232,10 +232,10 @@ export function createApp(options = {}) {
   function roomSummary(actor, room) {
     const subject = actor.role === 'client' ? `client:${actor.roomId}` : actor.id;
     const marker = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', room.id, subject)?.seq || 0;
-    const last = get(`SELECT body,created_at,sender_role,attachment_id FROM messages WHERE room_id=? ORDER BY seq DESC LIMIT 1`, room.id);
+    const last = get(`SELECT body,created_at,sender_role,attachment_id,deleted_at FROM messages WHERE room_id=? ORDER BY seq DESC LIMIT 1`, room.id);
     const unread = get(`SELECT COUNT(*) AS n FROM messages WHERE room_id=? AND seq>? AND
-      ${actor.role === 'client' ? "sender_role!='client'" : "sender_role='client'"}`, room.id, marker).n;
-    const result = { ...room, last: last ? { ...last, body: last.body || 'Attachment' } : null, unread,
+      deleted_at IS NULL AND ${actor.role === 'client' ? "sender_role!='client'" : "sender_role='client'"}`, room.id, marker).n;
+    const result = { ...room, last: last ? { ...last, body: last.deleted_at ? 'This message was deleted' : last.body || 'Attachment' } : null, unread,
       waitingSince: get('SELECT first_at FROM cycles WHERE room_id=?', room.id)?.first_at || null,
       agents: all(`SELECT u.id,u.name FROM users u JOIN assignments a ON a.user_id=u.id WHERE a.room_id=? AND u.disabled=0`, room.id) };
     if (actor.role !== 'client') {
@@ -353,7 +353,7 @@ export function createApp(options = {}) {
           for (const roomId of new Set(data.roomIds)) {
             if (actor.role === 'client') {
               if (roomId !== actor.roomId) continue;
-              const seq = get("SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND sender_role IN ('admin','agent')", roomId)?.n || 0;
+              const seq = get("SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND deleted_at IS NULL AND sender_role IN ('admin','agent')", roomId)?.n || 0;
               const subject = `delivered:client:${roomId}`; const previous = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', roomId, subject)?.seq || 0;
               if (seq > previous) {
                 run('INSERT INTO read_markers VALUES(?,?,?) ON CONFLICT(room_id,subject) DO UPDATE SET seq=MAX(seq,excluded.seq)', roomId, subject, seq);
@@ -365,7 +365,7 @@ export function createApp(options = {}) {
               ? Boolean(get('SELECT 1 FROM assignments WHERE room_id=? AND user_id=?', roomId, actor.id))
               : agentIds(roomId).length === 0;
             if (!eligible) continue;
-            const seq = get("SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND sender_role='client'", roomId)?.n || 0;
+            const seq = get("SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND deleted_at IS NULL AND sender_role='client'", roomId)?.n || 0;
             const subject = `delivered:${actor.id}`; const previous = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', roomId, subject)?.seq || 0;
             if (seq > previous) {
               run('INSERT INTO read_markers VALUES(?,?,?) ON CONFLICT(room_id,subject) DO UPDATE SET seq=MAX(seq,excluded.seq)', roomId, subject, seq);
@@ -402,6 +402,8 @@ export function createApp(options = {}) {
         ensure(message, 404, 'Message not found.');
         const senderId = actor.role === 'client' ? roomId : actor.id;
         ensure(actor.role === 'admin' || message.sender_id === senderId, 403, 'You can only delete messages you sent.');
+        if (message.deleted_at) return reply(200, { ok: true, deletedAt: message.deleted_at });
+        const deletedAt = clock();
         transaction(() => {
           const cycle = get('SELECT * FROM cycles WHERE room_id=?', roomId);
           if (cycle?.first_message_id === message.id) {
@@ -410,18 +412,19 @@ export function createApp(options = {}) {
             run('DELETE FROM cycles WHERE room_id=?', roomId);
           }
           if (message.attachment_id) run('INSERT OR IGNORE INTO file_deletions VALUES(?)', message.attachment_id);
-          run('DELETE FROM messages WHERE id=? AND room_id=?', message.id, roomId);
+          run("UPDATE messages SET body='',attachment_id=NULL,deleted_at=?,deleted_by=? WHERE id=? AND room_id=?",
+            deletedAt, senderId, message.id, roomId);
           if (message.attachment_id) run('DELETE FROM attachments WHERE id=?', message.attachment_id);
           if (cycle?.first_message_id === message.id) {
-            const next = get("SELECT id,created_at FROM messages WHERE room_id=? AND sender_role='client' AND seq>? ORDER BY seq LIMIT 1", roomId, message.seq);
+            const next = get("SELECT id,created_at FROM messages WHERE room_id=? AND deleted_at IS NULL AND sender_role='client' AND seq>? ORDER BY seq LIMIT 1", roomId, message.seq);
             if (next) run('INSERT INTO cycles(room_id,first_message_id,first_at) VALUES(?,?,?)', roomId, next.id, next.created_at);
           } else if (!cycle && ['admin', 'agent'].includes(message.sender_role)) {
-            const lastReply = get("SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND sender_role IN ('admin','agent')", roomId)?.n || 0;
-            const pending = get("SELECT id,created_at FROM messages WHERE room_id=? AND sender_role='client' AND seq>? ORDER BY seq LIMIT 1", roomId, lastReply);
+            const lastReply = get("SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND deleted_at IS NULL AND sender_role IN ('admin','agent')", roomId)?.n || 0;
+            const pending = get("SELECT id,created_at FROM messages WHERE room_id=? AND deleted_at IS NULL AND sender_role='client' AND seq>? ORDER BY seq LIMIT 1", roomId, lastReply);
             if (pending && get("SELECT status FROM rooms WHERE id=?", roomId)?.status === 'open') run('INSERT INTO cycles(room_id,first_message_id,first_at) VALUES(?,?,?)', roomId, pending.id, pending.created_at);
           }
         });
-        await tick(); emit(roomId); return reply(200, { ok: true });
+        await tick(); emit(roomId); return reply(200, { ok: true, deletedAt });
       }
       const roomMatch = /^\/api\/rooms\/([\w-]+)(?:\/(messages|read|upload|link|revoke))?$/.exec(path);
       if (roomMatch) {
@@ -471,16 +474,17 @@ export function createApp(options = {}) {
         }
         if (action === 'messages' && method === 'GET') {
           const before = Math.max(1, Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER);
-          const rows = all(`SELECT m.seq,m.id,m.sender_role,m.sender_id,m.body,m.created_at,m.attachment_id,
+          const rows = all(`SELECT m.seq,m.id,m.sender_role,m.sender_id,m.body,m.created_at,m.attachment_id,m.deleted_at,m.deleted_by,
             a.filename,a.mime,a.size FROM messages m LEFT JOIN attachments a ON a.id=m.attachment_id
             WHERE m.room_id=? AND m.seq<? ORDER BY m.seq DESC LIMIT 100`, roomId, before);
           // The display name is intentional; phone/email contact information is never joined here.
           const clientLabel = actor.role === 'client' ? room.code : get('SELECT name FROM client_private WHERE room_id=?', roomId)?.name || room.code;
           const receipts = actor.role === 'client' ? receiptState(roomId) : clientReceiptState(roomId);
-          return reply(200, { messages: rows.reverse().map(m => { const own = m.sender_id === (actor.role === 'client' ? roomId : actor.id); return ({ ...m,
+          return reply(200, { messages: rows.reverse().map(m => { const viewerId = actor.role === 'client' ? roomId : actor.id; const own = m.sender_id === viewerId; const { deleted_by: deletedBy, ...message } = m; return ({ ...message,
             own,
+            deleted_by_me: Boolean(m.deleted_at && deletedBy === viewerId),
             sender: m.sender_role === 'client' ? clientLabel : 'Wingfactor Support',
-            ...(own && m.sender_role !== 'system' ? { delivery: m.seq <= receipts.read ? 'read' : m.seq <= receipts.delivered ? 'delivered' : 'sent' } : {}),
+            ...(own && !m.deleted_at && m.sender_role !== 'system' ? { delivery: m.seq <= receipts.read ? 'read' : m.seq <= receipts.delivered ? 'delivered' : 'sent' } : {}),
           }); }), hasMore: rows.length === 100 });
         }
         if (action === 'messages' && method === 'POST') {

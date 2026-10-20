@@ -58,6 +58,7 @@ export function openStore(directory) {
       sender_id TEXT NOT NULL, sender_role TEXT NOT NULL,
       body TEXT NOT NULL DEFAULT '', attachment_id TEXT REFERENCES attachments(id),
       created_at INTEGER NOT NULL, nonce TEXT NOT NULL,
+      deleted_at INTEGER, deleted_by TEXT,
       UNIQUE(room_id,sender_id,nonce)
     );
     CREATE INDEX IF NOT EXISTS messages_room_seq ON messages(room_id,seq);
@@ -91,6 +92,10 @@ export function openStore(directory) {
       id TEXT PRIMARY KEY
     );
   `);
+  // Keep existing self-hosted databases compatible without discarding chat history.
+  const messageColumns = new Set(db.prepare('PRAGMA table_info(messages)').all().map(column => column.name));
+  if (!messageColumns.has('deleted_at')) db.exec('ALTER TABLE messages ADD COLUMN deleted_at INTEGER');
+  if (!messageColumns.has('deleted_by')) db.exec('ALTER TABLE messages ADD COLUMN deleted_by TEXT');
   const run = (sql, ...params) => db.prepare(sql).run(...params);
   const get = (sql, ...params) => db.prepare(sql).get(...params);
   const all = (sql, ...params) => db.prepare(sql).all(...params);
