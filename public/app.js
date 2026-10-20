@@ -52,7 +52,7 @@ function renderTyping() {
   for (const [key, value] of typers) if (value.until <= Date.now()) typers.delete(key);
   const active = chatIsVisible() ? [...typers.values()].filter(item => item.roomId === state.roomId) : [];
   indicator.classList.toggle('hidden', !active.length);
-  indicator.textContent = !active.length ? '' : active.length > 1 ? 'People are typing…' : active[0].role === 'client' ? 'Client is typing…' : 'Wingfactor Support is typing…';
+  indicator.textContent = !active.length ? '' : active.length > 1 ? 'People are typing…' : active[0].role === 'client' ? 'Member is typing…' : 'Wingfactor Support is typing…';
 }
 function receiveTyping(payload) {
   if (!payload || typeof payload.roomId !== 'string' || typeof payload.subject !== 'string' || payload.subject === state.me?.id || !['client','agent','admin'].includes(payload.role)) return;
