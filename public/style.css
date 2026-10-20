@@ -45,10 +45,10 @@ dialog.camera-dialog{inset:0;width:100vw;height:100dvh;max-width:none;max-height
 .appearance-note{margin-top:9px;font-size:12px;color:var(--muted)}
 :root[data-theme="dark"]{color-scheme:only dark;--ink:#e9edef;--muted:#aebac1;--green:#00a884;--line:#38434a;--paper:#0b141a;--cream:#2a3942;--forest:#202c33;--red:#ffb4ab}
 :root[data-theme="dark"] .inbox,:root[data-theme="dark"] dialog:not(.camera-dialog){background:#111b21}
-:root[data-theme="dark"] .chat-header,:root[data-theme="dark"] .composer-wrap{background:#202c33}
+:root[data-theme="dark"] .chat-header{background:#202c33}
 :root[data-theme="dark"] .bubble{background:#202c33;border-color:#202c33}
 :root[data-theme="dark"] .own .bubble{background:#005c4b;color:#e9edef;border-color:#005c4b}
-:root[data-theme="dark"] .composer,:root[data-theme="dark"] .field input,:root[data-theme="dark"] .field textarea,:root[data-theme="dark"] .field select{background:#2a3942;color:var(--ink);border-color:var(--line)}
+:root[data-theme="dark"] .composer-field,:root[data-theme="dark"] .field input,:root[data-theme="dark"] .field textarea,:root[data-theme="dark"] .field select{background:#2a3942;color:var(--ink);border-color:var(--line)}
 :root[data-theme="dark"] input::placeholder,:root[data-theme="dark"] textarea::placeholder{color:#aebac1;opacity:1}
 :root[data-theme="dark"] .room-item.selected{background:#2a3942;border-color:#38434a}
 :root[data-theme="dark"] .avatar{color:#d1d7db}
@@ -72,3 +72,17 @@ dialog.camera-dialog{inset:0;width:100vw;height:100dvh;max-width:none;max-height
 :root[data-theme="dark"] .call-panel{border-color:#38434a}
 :root[data-theme="dark"] .call-panel p{color:#d1d7db}
 :root[data-theme="dark"] .image-viewer,:root[data-theme="dark"] .call-videos{background:#0b141a}
+
+/* Compact WhatsApp-style composer: one pill and a separate circular action. */
+.composer-wrap{flex-shrink:0}
+.composer{background:transparent;border:0;border-radius:0;box-shadow:none;overflow:visible}
+.composer-row{display:flex;align-items:flex-end;gap:8px}
+.composer-field{display:flex;align-items:flex-end;flex:1;min-width:0;min-height:52px;gap:2px;padding:2px 4px;background:#fff;border-radius:26px}
+.composer-field textarea{display:block;flex:1;min-width:0;width:0;min-height:48px;height:48px;max-height:144px;padding:13px 4px;line-height:22px;font-size:16px;overflow-y:hidden}
+.composer-field .icon-btn{flex:0 0 40px;width:40px;height:48px;padding:9px;color:var(--muted);border-radius:50%}
+.composer-field .icon-btn svg{width:22px;height:22px}
+.composer-row .send{flex:0 0 52px;display:grid;place-items:center;width:52px;height:52px;padding:14px;border-radius:50%;margin:0}
+.composer-row .send svg{width:24px;height:24px}
+.composer .file-preview{margin-bottom:8px;border:0;border-radius:12px;padding:9px 12px}
+.composer .file-preview span{min-width:0;overflow-wrap:anywhere}
+.composer-footer{padding-top:7px}

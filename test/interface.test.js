@@ -83,7 +83,7 @@ test('all roles can change appearance without losing their draft or recreating t
     assert.equal(f.window.localStorage.getItem('wingfactor-chat-theme'), 'dark');
     assert.equal(f.document.querySelector('[data-theme-choice="dark"]').getAttribute('aria-pressed'), 'true');
     assert.equal(f.window.getComputedStyle(header).backgroundColor, 'rgb(32, 44, 51)');
-    assert.equal(f.window.getComputedStyle(f.document.querySelector('.composer')).backgroundColor, 'rgb(42, 57, 66)');
+    assert.equal(f.window.getComputedStyle(f.document.querySelector('.composer-field')).backgroundColor, 'rgb(42, 57, 66)');
     assert.equal(f.document.querySelector('#message-input'), input);
     assert.equal(input.value, 'My unsent draft');
     assert.equal(f.document.querySelector('.chat-header'), header);
@@ -100,7 +100,7 @@ test('all roles can change appearance without losing their draft or recreating t
     assert.equal(f.document.documentElement.dataset.theme, 'normal');
     assert.equal(f.window.localStorage.getItem('wingfactor-chat-theme'), 'normal');
     assert.equal(f.document.querySelector('meta[name="color-scheme"]').content, 'only light');
-    assert.equal(f.window.getComputedStyle(f.document.querySelector('.composer')).backgroundColor, 'rgb(255, 255, 255)');
+    assert.equal(f.window.getComputedStyle(f.document.querySelector('.composer-field')).backgroundColor, 'rgb(255, 255, 255)');
   }
 });
 
@@ -192,6 +192,33 @@ test('call cleanup avoids ambiguous notification columns and secure status is al
   assert.match(serviceWorker, /requireInteraction: call/);
   assert.match(serviceWorker, /\['message', 'reply'\]\.includes\(payload\.kind\)/);
   assert.match(receiptMigration, /role_name='agent' or not exists/);
+});
+
+test('compact composer switches between recording and sending and grows with the draft', async t => {
+  const f = await ui(t, { role: 'client' });
+  const input = f.document.querySelector('#message-input');
+  const send = f.document.querySelector('#send-button'), record = f.document.querySelector('#record-button');
+  assert.equal(f.window.getComputedStyle(send).display, 'none');
+  assert.notEqual(f.window.getComputedStyle(record).display, 'none');
+  let scrollHeight = 220;
+  Object.defineProperty(input, 'scrollHeight', { get: () => scrollHeight });
+  input.value = 'A long message\nwith several lines';
+  input.dispatchEvent(new f.window.Event('input', { bubbles: true }));
+  assert.notEqual(f.window.getComputedStyle(send).display, 'none');
+  assert.equal(f.window.getComputedStyle(record).display, 'none');
+  assert.equal(input.style.height, '144px');
+  assert.equal(input.style.overflowY, 'auto');
+  scrollHeight = 48;
+  send.click();
+  assert.equal(input.value, ''); assert.equal(input.style.height, '48px');
+  assert.equal(f.window.getComputedStyle(send).display, 'none');
+  assert.notEqual(f.window.getComputedStyle(record).display, 'none');
+  await until(() => f.document.querySelector('.message:not(.pending-message)'));
+  f.window.previewFile(new f.window.File(['photo'], 'sample.jpg', { type: 'image/jpeg' }));
+  assert.notEqual(f.window.getComputedStyle(send).display, 'none');
+  f.document.querySelector('[data-action="remove-file"]').click();
+  assert.equal(f.window.getComputedStyle(send).display, 'none');
+  assert.notEqual(f.window.getComputedStyle(record).display, 'none');
 });
 
 test('sending through the composer renders text safely and clears the sent draft', async t => {

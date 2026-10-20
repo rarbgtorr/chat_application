@@ -16,6 +16,7 @@ const icons = {
   search: '<circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/>',
   send: '<path d="m22 2-7 20-4-9L2 9 22 2ZM22 2 11 13"/>',
   clip: '<path d="m21 11-9 9a6 6 0 0 1-8-8L14 2a4 4 0 0 1 6 6L9 19a2 2 0 0 1-3-3l10-10"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/>',
   back: '<path d="m14 6-6 6 6 6"/>', close: '<path d="m6 6 12 12M18 6 6 18"/>',
   lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V6a4 4 0 0 1 8 0v4"/>',
@@ -170,9 +171,24 @@ function renderChat() {
   }
   const client = state.me.role === 'client', displayName = client ? 'Wingfactor Support' : clientName(room);
   const avatar = client ? '<img class="avatar support-logo" src="/icon.svg" width="40" height="40" alt="Wingfactor logo">' : `<span class="avatar">${initials(displayName)}</span>`;
-  $('#conversation').innerHTML = `<header class="chat-header">${!client ? `<span class="mobile-back">${iconButton('back', 'back', 'Back to conversations')}</span>` : ''}${avatar}<div class="chat-title"><h2>${esc(displayName)}</h2>${client ? '' : `<p>${room.agents.length ? `Assigned to ${esc(room.agents.map(a => a.name).join(', '))}` : 'No teammate assigned'}</p>`}</div><div class="header-actions"><span class="connection"><span class="dot"></span><span id="connection-text">Connecting…</span></span><span class="tag">${room.status === 'open' ? 'Open' : 'Closed'}</span>${state.calls && room.status==='open' ? `${iconButton('phone', 'voice-call', 'Start voice call')}${iconButton('video', 'video-call', 'Start video call')}` : ''}${state.me.role === 'agent' ? iconButton('note', 'client-notes', 'View client notes') : ''}${iconButton('settings', 'settings', 'Settings')}${state.me.role === 'admin' ? iconButton('more', 'room-settings', 'Conversation settings') : ''}</div></header><div id="notification-banner"></div><div class="messages" id="messages" role="log" aria-label="Conversation messages" aria-live="polite"></div><div class="composer-wrap">${room.status === 'open' ? `<form class="composer" id="message-form"><div id="file-preview" class="file-preview hidden"></div><label class="hidden" for="message-input">Message</label><textarea id="message-input" placeholder="Write a message…" maxlength="10000"></textarea><div class="composer-bar">${iconButton('clip', 'attach', 'Attach a file')}${state.calls ? iconButton('camera', 'camera', 'Take a photo') : ''}${iconButton('mic', 'record', 'Record or stop a voice note')}<span class="composer-hint">Enter to send · Shift + Enter for a new line</span><button class="send" id="send-button" type="submit">Send ${icon('send')}</button></div><input type="file" id="file-input" class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,.mp3,.m4a,.ogg,.wav,.pdf,.doc,.docx,.txt,.csv"></form><div class="composer-footer">${client ? `<span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Securely connected</span>` : `<span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Private support room</span><span>Messages stay until your admin deletes them.</span>`}</div>` : `<div class="settings-note">This conversation is closed. Your history and files are still available.</div>`}</div>`;
+  $('#conversation').innerHTML = `<header class="chat-header">${!client ? `<span class="mobile-back">${iconButton('back', 'back', 'Back to conversations')}</span>` : ''}${avatar}<div class="chat-title"><h2>${esc(displayName)}</h2>${client ? '' : `<p>${room.agents.length ? `Assigned to ${esc(room.agents.map(a => a.name).join(', '))}` : 'No teammate assigned'}</p>`}</div><div class="header-actions"><span class="connection"><span class="dot"></span><span id="connection-text">Connecting…</span></span><span class="tag">${room.status === 'open' ? 'Open' : 'Closed'}</span>${state.calls && room.status==='open' ? `${iconButton('phone', 'voice-call', 'Start voice call')}${iconButton('video', 'video-call', 'Start video call')}` : ''}${state.me.role === 'agent' ? iconButton('note', 'client-notes', 'View client notes') : ''}${iconButton('settings', 'settings', 'Settings')}${state.me.role === 'admin' ? iconButton('more', 'room-settings', 'Conversation settings') : ''}</div></header><div id="notification-banner"></div><div class="messages" id="messages" role="log" aria-label="Conversation messages" aria-live="polite"></div><div class="composer-wrap">${room.status === 'open' ? `<form class="composer" id="message-form"><div id="file-preview" class="file-preview hidden"></div><label class="hidden" for="message-input">Message</label><div class="composer-row"><div class="composer-field">${iconButton('clip', 'attach', 'Attach a file')}<textarea id="message-input" placeholder="Message" rows="1" maxlength="10000"></textarea>${state.calls ? iconButton('camera', 'camera', 'Take a photo') : ''}</div><button class="send composer-record" id="record-button" type="button" data-action="record" aria-label="Record a voice note" title="Record a voice note">${icon('mic')}</button><button class="send hidden" id="send-button" type="submit" aria-label="Send message" title="Send message"><span class="hidden">Send</span>${icon('send')}</button></div><input type="file" id="file-input" class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,.mp3,.m4a,.ogg,.wav,.pdf,.doc,.docx,.txt,.csv"></form><div class="composer-footer">${client ? `<span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Securely connected</span>` : `<span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Private support room</span><span>Messages stay until your admin deletes them.</span>`}</div>` : `<div class="settings-note">This conversation is closed. Your history and files are still available.</div>`}</div>`;
   const indicator = document.createElement('p'); indicator.id = 'typing-indicator'; indicator.className = 'hidden'; indicator.setAttribute('role', 'status'); indicator.setAttribute('aria-live', 'polite'); $('.composer-wrap').prepend(indicator);
-  state.file = null; renderMessages(); notificationBanner(); connection(state.connected); renderTyping(); reportActivity(true);
+  state.file = null; syncComposer(); renderMessages(); notificationBanner(); connection(state.connected); renderTyping(); reportActivity(true);
+}
+function syncComposer() {
+  const input = $('#message-input'), send = $('#send-button'), record = $('#record-button');
+  if (!input || !send || !record) return;
+  const recording = state.recorder?.state === 'recording';
+  const canSend = !recording && Boolean(input.value.trim() || state.file);
+  send.classList.toggle('hidden', !canSend); record.classList.toggle('hidden', canSend);
+  const label = recording ? 'Stop voice recording' : 'Record a voice note';
+  if (record.getAttribute('aria-label') !== label) {
+    record.setAttribute('aria-label', label); record.title = label; record.innerHTML = icon(recording ? 'stop' : 'mic');
+  }
+  // Start at one line, grow with the draft, and scroll after five lines.
+  input.style.height = '48px';
+  input.style.height = `${Math.max(48, Math.min(144, input.scrollHeight))}px`;
+  input.style.overflowY = input.scrollHeight > 144 ? 'auto' : 'hidden';
 }
 function renderMessages(prepend = false) {
   const container = $('#messages'); if (!container) return;
@@ -446,7 +462,7 @@ function previewFile(file, sendImmediately = false) {
       localUrl: URL.createObjectURL(file), file, nonce: crypto.randomUUID(), pending: true, failed: false, serverId: null };
     state.pendingMessages.push(pending); form.dataset.pendingId = pending.id; renderMessages();
   }
-  return true;
+  syncComposer(); return true;
 }
 async function sendPendingMessage(pending) {
   if (!pending || pending.sending || pending.serverId) return;
@@ -483,9 +499,9 @@ async function record() {
     $('[data-action="record"]')?.classList.remove('recording');
     const mime = recorder.mimeType; const extension = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm';
     previewFile(new File(chunks, `voice-note-${Date.now()}.${extension}`, { type: mime }));
-    state.recorder = null; toast('Voice note ready. Press Send to share it.');
+    state.recorder = null; syncComposer(); toast('Voice note ready. Press Send to share it.');
   };
-  recorder.start(); $('[data-action="record"]')?.classList.add('recording');
+  recorder.start(); syncComposer(); $('[data-action="record"]')?.classList.add('recording');
   state.recordingTimer = setTimeout(() => recorder.state === 'recording' && recorder.stop(), 3 * 60 * 1000);
   toast('Recording… Tap the microphone again to stop. Maximum 3 minutes.');
 }
@@ -532,7 +548,7 @@ document.addEventListener('submit', async event => {
       } else {
         pending.body = value; pending.file ||= file; pending.nonce ||= crypto.randomUUID();
       }
-      input.value = ''; stopTyping(); state.file = null; $('#file-preview').classList.add('hidden');
+      input.value = ''; stopTyping(); state.file = null; $('#file-preview').classList.add('hidden'); syncComposer();
       delete form.dataset.pendingId; renderMessages();
       void sendPendingMessage(pending); return;
     }
@@ -664,7 +680,7 @@ document.addEventListener('click', async event => {
       case 'attach': $('#file-input').click(); break;
       case 'remove-file': {
         const form = $('#message-form'); if (form?.dataset.pendingId) removePendingMessage(form.dataset.pendingId);
-        if (form) delete form.dataset.pendingId; state.file = null; $('#file-preview').classList.add('hidden'); break;
+        if (form) delete form.dataset.pendingId; state.file = null; $('#file-preview').classList.add('hidden'); syncComposer(); break;
       }
       case 'retry-send': void sendPendingMessage(state.pendingMessages.find(message => message.id === button.dataset.pendingId)); break;
       case 'record': if(state.media?.active())throw new Error('Finish your call before recording a voice note.'); await record(); break;
@@ -680,8 +696,9 @@ document.addEventListener('click', async event => {
 });
 document.addEventListener('input', event => {
   if (event.target.id === 'room-search') { state.search = event.target.value; renderList(); }
-  if (event.target.id === 'message-input') { chatActivity.typingUntil = event.target.value.trim() ? Date.now() + 3500 : 0; reportActivity(); }
+  if (event.target.id === 'message-input') { syncComposer(); chatActivity.typingUntil = event.target.value.trim() ? Date.now() + 3500 : 0; reportActivity(); }
 });
+window.addEventListener('resize', syncComposer);
 document.addEventListener('focusout', event => { if (event.target.id === 'message-input') stopTyping(); });
 document.addEventListener('change', event => { if (event.target.id === 'file-input' && event.target.files[0]) { previewFile(event.target.files[0]); event.target.value = ''; } });
 document.addEventListener('keydown', event => {
