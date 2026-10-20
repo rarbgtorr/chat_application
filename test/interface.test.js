@@ -14,10 +14,13 @@ const deleteMigration = await readFile(new URL('../supabase/migrations/202610200
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
-async function ui(t, { role = 'agent', link = false, uploadGate = null, messageGate = null } = {}) {
+async function ui(t, { role = 'agent', link = false, uploadGate = null, messageGate = null, pointerEvents = true } = {}) {
   const roomId = 'room123'; const calls = []; const messages = [];
   const dom = new JSDOM(html, { url: `http://localhost:3000/${role === 'client' ? `c/${roomId}${link ? '#key=private-secret' : ''}` : '?room=room123'}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
+  const stylesheet = window.document.createElement('style'); stylesheet.textContent = styles; window.document.head.append(stylesheet);
+  if (!pointerEvents) window.PointerEvent = undefined;
+  const errors = []; window.addEventListener('error', event => errors.push(event.error?.message || event.message));
   window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   window.HTMLDialogElement.prototype.close = function () { this.open = false; };
   window.EventSource = class { addEventListener() {} close() {} };
@@ -54,7 +57,7 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null, messageG
   };
   window.eval(script);
   await until(() => window.document.querySelector('#message-form'));
-  t.after(() => dom.window.close());
+  t.after(() => { dom.window.close(); assert.deepEqual(errors, [], 'Unexpected UI error'); });
   return { window, document: window.document, calls, messages, room };
 }
 
@@ -173,13 +176,16 @@ test('message deletion controls follow sender ownership and admin permissions', 
   );
   await client.window.refresh();
   client.window.confirm = () => { throw new Error('Message deletion must not use browser confirmation.'); };
-  assert.equal(client.document.querySelector('.message button'), null);
+  const deleteTrigger = client.document.querySelector('[data-delete-options="client-own"]');
+  assert.equal(client.window.getComputedStyle(deleteTrigger).visibility, 'hidden');
   assert.equal(client.document.querySelector('[data-message-id="staff-other"]').hasAttribute('data-selectable'), false);
   const bubble = client.document.querySelector('[data-message-id="client-own"] .bubble');
   bubble.dispatchEvent(new client.window.MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
-  await until(() => client.document.querySelector('[data-delete-options="client-own"]'));
+  await until(() => bubble.closest('.message').classList.contains('selected'));
   bubble.dispatchEvent(new client.window.MouseEvent('pointerup', { bubbles: true }));
   assert.ok(bubble.closest('.message').classList.contains('selected'));
+  assert.equal(client.window.getComputedStyle(deleteTrigger).visibility, 'visible');
+  assert.equal(deleteTrigger.closest('.message').dataset.messageId, 'client-own');
   assert.equal(client.document.querySelector('.bubble button'), null);
   await client.window.refresh();
   assert.ok(client.document.querySelector('[data-delete-options="client-own"]'));
@@ -193,7 +199,7 @@ test('message deletion controls follow sender ownership and admin permissions', 
   await until(() => client.messages.find(message => message.id === 'client-own')?.deleted_at && !client.document.querySelector('[data-delete-message="client-own"]'));
   assert.match(client.document.querySelector('.deleted-message').textContent, /You deleted this message/);
   assert.equal(client.document.querySelector('[data-delete-message="client-own"]'), null);
-  assert.equal(client.document.querySelector('#message-selection-toolbar'), null);
+  assert.equal(client.document.querySelector('.message.selected'), null);
 
   const admin = await ui(t, { role: 'admin' });
   admin.messages.push({ id: 'client-message', seq: 1, body: 'Client', sender: 'Visible Client', sender_role: 'client', own: false, created_at: Date.now() });
@@ -201,7 +207,7 @@ test('message deletion controls follow sender ownership and admin permissions', 
   admin.document.querySelector('.bubble').dispatchEvent(new admin.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
   assert.ok(admin.document.querySelector('[data-delete-options="client-message"]'));
   admin.document.dispatchEvent(new admin.window.KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
-  assert.equal(admin.document.querySelector('#message-selection-toolbar'), null);
+  assert.equal(admin.document.querySelector('.message.selected'), null);
   assert.match(deleteMigration, /role_name<>'admin' and m\.sender_id<>who/);
   assert.match(deleteMigration, /update public\.wc_messages set body='',attachment_id=null,deleted_at=/);
   assert.match(deleteMigration, /revoke all on function public\.wc_message_delete/);
@@ -227,12 +233,12 @@ test('message selection cancels for short taps, scrolling, movement and pointer 
     down(); assert.equal(timers.size, 1);
     bubble.dispatchEvent(new f.window.MouseEvent(type, { bubbles: true, clientX: 30, clientY: 30 }));
     assert.equal(timers.size, 0);
-    assert.equal(f.document.querySelector('#message-selection-toolbar'), null);
+    assert.equal(f.document.querySelector('.message.selected'), null);
   }
   down(); [...timers.values()][0]();
   assert.ok(f.document.querySelector('[data-delete-options="my-reply"]'));
-  f.document.querySelector('[data-action="clear-message-selection"]').click();
-  assert.equal(f.document.querySelector('#message-selection-toolbar'), null);
+  f.document.querySelector('#message-input').click();
+  assert.equal(f.document.querySelector('.message.selected'), null);
   const message = f.document.querySelector('.message');
   message.dispatchEvent(new f.window.KeyboardEvent('keydown', { bubbles: true, key: 'F10', shiftKey: true }));
   assert.ok(f.document.querySelector('[data-delete-options="my-reply"]'));
@@ -245,9 +251,56 @@ test('a long press on a photo selects it without opening the image viewer', asyn
   await f.window.refresh();
   const photo = f.document.querySelector('.image-open');
   photo.dispatchEvent(new f.window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
-  await until(() => f.document.querySelector('[data-delete-options="my-photo"]'));
+  await until(() => photo.closest('.message').classList.contains('selected'));
   photo.dispatchEvent(new f.window.MouseEvent('pointerup', { bubbles: true })); photo.click();
   assert.equal(f.document.querySelector('.image-viewer'), null);
+  assert.equal(f.document.querySelector('#modal').open, false);
+  // The revealed button must work even during suppression of the long-press click.
+  f.document.querySelector('[data-delete-options="my-photo"]').click();
+  assert.equal(f.document.querySelector('#modal').open, true);
+  assert.ok(f.document.querySelector('[data-delete-message="my-photo"]'));
+});
+
+test('client, teammate and admin can use the per-message popup to delete photos without browser prompts', async t => {
+  for (const role of ['client', 'agent', 'admin']) {
+    const f = await ui(t, { role });
+    f.window.confirm = () => { throw new Error('Unexpected browser confirmation'); };
+    const id = `photo-${role}`;
+    f.messages.push({ id, seq: 1, body: '', attachment_id: 'photo-file', filename: 'photo.jpg', mime: 'image/jpeg',
+      own: role !== 'admin', sender_role: role === 'admin' ? 'client' : role, created_at: Date.now() });
+    await f.window.refresh();
+    const trigger = f.document.querySelector(`[data-delete-options="${id}"]`);
+    assert.equal(trigger.closest('.message-content').querySelector('.bubble .message-delete-trigger'), null);
+    // Desktop hover reveals this same button through CSS; clicking opens the in-app popup.
+    trigger.click(); assert.equal(f.document.querySelector('#modal').open, true);
+    f.document.querySelector(`[data-delete-message="${id}"]`).click();
+    await until(() => f.messages[0].deleted_at && !f.document.querySelector(`[data-delete-options="${id}"]`));
+    assert.match(f.document.querySelector('.deleted-message').textContent, /You deleted this message/);
+  }
+});
+
+test('touch fallback selects a message and delete errors stay in the popup for retry', async t => {
+  const f = await ui(t, { role: 'client', pointerEvents: false });
+  f.messages.push({ id: 'retry-delete', seq: 1, body: 'Please delete', own: true, sender_role: 'client', created_at: Date.now() });
+  await f.window.refresh();
+  const bubble = f.document.querySelector('.bubble');
+  const touch = new f.window.Event('touchstart', { bubbles: true });
+  Object.defineProperty(touch, 'touches', { value: [{ identifier: 1, clientX: 10, clientY: 10 }] });
+  bubble.dispatchEvent(touch);
+  await until(() => bubble.closest('.message').classList.contains('selected'));
+  bubble.dispatchEvent(new f.window.Event('touchend', { bubbles: true }));
+  f.document.querySelector('[data-delete-options="retry-delete"]').click();
+  const fetch = f.window.fetch;
+  f.window.fetch = async (path, options) => options?.method === 'DELETE'
+    ? { ok: false, status: 401, json: async () => { throw new SyntaxError('Unexpected HTML response'); } }
+    : fetch(path, options);
+  const button = f.document.querySelector('[data-delete-message="retry-delete"]'); button.click();
+  await until(() => f.document.querySelector('.delete-message-error').textContent);
+  assert.match(f.document.querySelector('.delete-message-error').textContent, /sign in again/);
+  assert.equal(button.disabled, false); assert.equal(f.document.querySelector('#modal').open, true);
+  assert.equal(f.messages[0].deleted_at, undefined);
+  f.window.fetch = fetch; button.click();
+  await until(() => f.messages[0].deleted_at && !f.document.querySelector('#modal').open);
   assert.equal(f.document.querySelector('#modal').open, false);
 });
 

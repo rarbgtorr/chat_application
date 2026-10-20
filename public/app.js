@@ -34,7 +34,12 @@ function toast(message) { $('#toast').textContent = message; $('#toast').classLi
 async function api(path, options = {}) {
   const headers = { ...(options.body && !(options.body instanceof Blob) ? { 'Content-Type': 'application/json' } : {}), ...options.headers };
   const response = await fetch(path, { ...options, headers, credentials: 'same-origin', cache: 'no-store' });
-  const result = await response.json();
+  let result;
+  try { result = await response.json(); }
+  catch {
+    const error = new Error(response.status === 401 ? 'Please sign in again or reopen your private support link.' : 'Could not reach the chat service. Refresh and try again.');
+    error.status = response.status; throw error;
+  }
   if (!response.ok) { const error = new Error(result.error || 'Request failed.'); error.status = response.status; throw error; }
   return result;
 }
@@ -56,23 +61,16 @@ function dismiss() { $('#modal').close(); }
 function cancelMessagePress() { clearTimeout(messagePress?.timer); messagePress = null; }
 function clearMessageSelection() {
   cancelMessagePress(); state.selectedMessageId = null;
-  $('#message-selection-toolbar')?.remove();
   document.querySelectorAll('.message.selected').forEach(node => node.classList.remove('selected'));
 }
 function syncMessageSelection() {
   const message = state.messages.find(item => item.id === state.selectedMessageId);
   if (!message || message.deleted_at || !(message.own || state.me?.role === 'admin')) return clearMessageSelection();
   document.querySelectorAll('[data-message-id]').forEach(node => node.classList.toggle('selected', node.dataset.messageId === message.id));
-  if (!$('#message-selection-toolbar')) {
-    const toolbar = document.createElement('div'); toolbar.id = 'message-selection-toolbar'; toolbar.className = 'message-selection-toolbar';
-    toolbar.setAttribute('role', 'toolbar'); toolbar.setAttribute('aria-label', 'Selected message actions');
-    toolbar.innerHTML = `${iconButton('back', 'clear-message-selection', 'Cancel message selection')}<span role="status">1 selected</span><button class="icon-btn" type="button" data-delete-options="${esc(message.id)}" aria-label="Delete selected message" title="Delete message">${icon('trash')}</button>`;
-    $('#conversation').append(toolbar);
-  } else $('#message-selection-toolbar [data-delete-options]').dataset.deleteOptions = message.id;
 }
 function selectMessage(messageId) {
   state.selectedMessageId = messageId; syncMessageSelection();
-  window.getSelection()?.removeAllRanges();
+  window.getSelection?.()?.removeAllRanges?.();
 }
 function initials(name) { return esc(name.split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase()); }
 function cameraPhoto(message) { return message.sender_role === 'client' && /^photo-\d+\.jpe?g$/i.test(message.filename || ''); }
@@ -165,8 +163,9 @@ function renderMessages(prepend = false) {
     const meta = message.own ? '' : `<div class="message-meta"><span>${esc(message.sender)}</span><time>${formatTime(message.created_at)}</time></div>`;
     const status = `<span class="message-status"><time>${formatTime(message.created_at)}</time>${receipt ? deliveryMark(delivery, message.failed, message.id) : ''}</span>`;
     const canDelete = !message.pending && !deleted && (message.own || state.me.role === 'admin');
+    const remove = canDelete ? `<button type="button" class="message-delete-trigger" data-delete-options="${esc(message.id)}" aria-label="Delete message" title="Delete message">${icon('trash')}</button>` : '';
     const content = deleted ? `<span class="deleted-message">${icon('deleted')}<em>${message.deleted_by_me ? 'You deleted this message' : 'This message was deleted'}</em></span>` : `${message.body ? `<span class="message-body">${esc(message.body)}</span>` : ''}${attachment}`;
-    return `${divider}<article data-key="${key}" data-message-id="${esc(message.id)}" ${canDelete ? 'data-selectable="true" tabindex="0" aria-keyshortcuts="Shift+F10" title="Press and hold for message actions"' : ''} class="message ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="bubble">${content}${status}</div></article>`;
+    return `${divider}<article data-key="${key}" data-message-id="${esc(message.id)}" ${canDelete ? 'data-selectable="true" tabindex="0" aria-keyshortcuts="Shift+F10" title="Press and hold for message actions"' : ''} class="message ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="message-content"><div class="bubble">${content}${status}</div>${remove}</div></article>`;
   }).join('');
   const template = document.createElement('template');
   template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(clientName(room))}. Send a message to get started.`}</p></div>`}`;
@@ -468,17 +467,20 @@ document.addEventListener('submit', async event => {
     if (target) target.textContent = error.message; else toast(error.message);
   } finally { if (button?.isConnected && form.id !== 'message-form') { button.disabled = false; button.innerHTML = oldLabel; } }
 });
-document.addEventListener('pointerdown', event => {
+function startMessagePress(target, point, pointerId) {
   cancelMessagePress();
-  const message = event.target.closest('.message[data-selectable="true"]');
-  if (!message || event.isPrimary === false || (event.button !== undefined && event.button !== 0) ||
-    !event.target.closest('.bubble') || event.target.closest('a,audio,video,input,button:not(.image-open)')) return;
-  const press = { id: message.dataset.messageId, pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  const message = target?.closest?.('.message[data-selectable="true"]');
+  if (!message || !target.closest('.bubble') || target.closest('a,audio,video,input,button:not(.image-open)')) return;
+  const press = { id: message.dataset.messageId, pointerId, x: point.clientX, y: point.clientY };
   press.timer = setTimeout(() => {
     if (messagePress !== press || !message.isConnected) return;
     selectMessage(press.id); press.selected = true; suppressMessageClick = { id: press.id, until: Date.now() + 1000 };
   }, 500);
   messagePress = press;
+}
+document.addEventListener('pointerdown', event => {
+  if (event.isPrimary === false || (event.button !== undefined && event.button !== 0)) return cancelMessagePress();
+  startMessagePress(event.target, event, event.pointerId);
 });
 document.addEventListener('pointermove', event => {
   if (messagePress && event.pointerId === messagePress.pointerId &&
@@ -489,21 +491,36 @@ for (const name of ['pointerup', 'pointercancel']) document.addEventListener(nam
   cancelMessagePress();
 });
 document.addEventListener('scroll', cancelMessagePress, true);
+if (!window.PointerEvent) {
+  document.addEventListener('touchstart', event => {
+    if (event.touches.length !== 1) return cancelMessagePress();
+    startMessagePress(event.target, event.touches[0], event.touches[0].identifier);
+  }, { passive: true });
+  document.addEventListener('touchmove', event => {
+    const touch = [...event.touches].find(item => item.identifier === messagePress?.pointerId);
+    if (!touch || Math.hypot(touch.clientX - messagePress.x, touch.clientY - messagePress.y) > 10) cancelMessagePress();
+  }, { passive: true });
+  for (const name of ['touchend', 'touchcancel']) document.addEventListener(name, () => {
+    if (messagePress?.selected) suppressMessageClick = { id: messagePress.id, until: Date.now() + 1000 };
+    cancelMessagePress();
+  });
+}
 document.addEventListener('contextmenu', event => {
-  const message = event.target.closest('.message[data-selectable="true"] .bubble');
+  const message = event.target.closest?.('.message[data-selectable="true"] .bubble');
   if (!message || event.target.closest('audio,video,a')) return;
   const id = message.closest('.message').dataset.messageId;
   event.preventDefault(); cancelMessagePress(); selectMessage(id); suppressMessageClick = { id, until: Date.now() + 1000 };
 });
 document.addEventListener('click', event => {
-  const message = event.target.closest('[data-message-id]');
-  if (suppressMessageClick && message && suppressMessageClick.id === message.dataset.messageId && Date.now() < suppressMessageClick.until) {
+  const target = event.target.closest ? event.target : event.target.parentElement; if (!target) return;
+  const message = target.closest('[data-message-id]');
+  if (!target.closest('[data-delete-options]') && suppressMessageClick && message && suppressMessageClick.id === message.dataset.messageId && Date.now() < suppressMessageClick.until) {
     suppressMessageClick = null; event.preventDefault(); event.stopImmediatePropagation(); return;
   }
-  if (state.selectedMessageId && !event.target.closest('#message-selection-toolbar,#modal') && message?.dataset.messageId !== state.selectedMessageId) clearMessageSelection();
+  if (state.selectedMessageId && !target.closest('#modal') && message?.dataset.messageId !== state.selectedMessageId) clearMessageSelection();
 }, true);
 document.addEventListener('click', async event => {
-  const button = event.target.closest('button'); if (!button) return;
+  const button = event.target.closest?.('button'); if (!button) return;
   try {
     if (!state.sound && window.AudioContext) { state.sound = new AudioContext(); }
     if (state.sound?.state === 'suspended') void state.sound.resume();
@@ -513,14 +530,17 @@ document.addEventListener('click', async event => {
     if (button.dataset.deleteOptions) {
       const message = state.messages.find(item => item.id === button.dataset.deleteOptions);
       if (!message || message.deleted_at || !(message.own || state.me.role === 'admin')) return clearMessageSelection();
-      modal('Delete message', `<div class="delete-message-options"><button type="button" class="danger" data-delete-message="${esc(message.id)}">${icon('trash')} Delete for everyone</button><button type="button" class="secondary" data-action="close-modal">Cancel</button></div>`);
+      selectMessage(message.id);
+      modal('Delete message', `<div class="delete-message-options"><button type="button" class="danger" data-delete-message="${esc(message.id)}" data-delete-room="${esc(state.roomId)}">${icon('trash')} Delete for everyone</button><button type="button" class="secondary" data-action="close-modal">Cancel</button><p class="error delete-message-error" role="alert"></p></div>`);
       return;
     }
     if (button.dataset.deleteMessage) {
-      button.disabled = true;
+      button.disabled = true; button.setAttribute('aria-busy', 'true');
+      const roomId = button.dataset.deleteRoom;
+      const errorText = $('#modal .delete-message-error'); if (errorText) errorText.textContent = '';
       let result;
-      try { result = await api(`/api/rooms/${state.roomId}/messages/${button.dataset.deleteMessage}`, { method: 'DELETE' }); }
-      catch (error) { button.disabled = false; throw error; }
+      try { result = await api(`/api/rooms/${roomId}/messages/${button.dataset.deleteMessage}`, { method: 'DELETE' }); }
+      catch (error) { button.disabled = false; button.removeAttribute('aria-busy'); if (errorText) errorText.textContent = error.message; else toast(error.message); return; }
       const message = state.messages.find(item => item.id === button.dataset.deleteMessage);
       if (message) Object.assign(message, { body: '', attachment_id: null, attachment_expired: false,
         deleted_at: result.deletedAt || Date.now(), deleted_by_me: true, delivery: undefined });
@@ -582,7 +602,7 @@ document.addEventListener('input', event => { if (event.target.id === 'room-sear
 document.addEventListener('change', event => { if (event.target.id === 'file-input' && event.target.files[0]) { previewFile(event.target.files[0]); event.target.value = ''; } });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') { clearMessageSelection(); return; }
-  const message = event.target.closest('.message[data-selectable="true"]');
+  const message = event.target.closest?.('.message[data-selectable="true"]');
   if (message && (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey)) {
     event.preventDefault(); selectMessage(message.dataset.messageId); return;
   }
