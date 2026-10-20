@@ -84,7 +84,7 @@ test('client access secret is exchanged once and removed from the visible URL', 
   assert.equal(f.calls[0].data.key, 'private-secret');
   assert.match(f.document.querySelector('.chat-title').textContent, /Wingfactor Support/);
   const logo = f.document.querySelector('.chat-header .support-logo');
-  assert.equal(logo.getAttribute('src'), '/icon.svg');
+  assert.equal(logo.getAttribute('src'), '/wingfactor-mark.svg');
   assert.equal(logo.getAttribute('alt'), 'Wingfactor logo');
   assert.equal(logo.closest('.rail'), null);
   assert.equal(f.document.querySelector('.chat-title p'), null);
