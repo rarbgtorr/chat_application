@@ -172,6 +172,37 @@ test('client, teammate, and admin outgoing messages show WhatsApp delivery ticks
   }
 });
 
+test('consecutive messages share one sender label while every bubble keeps its time', async t => {
+  for (const role of ['client', 'agent', 'admin']) {
+    const f = await ui(t, { role }); const at = new Date(2026, 9, 20, 12).getTime();
+    const sender = role === 'client' ? 'Wingfactor Support' : 'Visible Member';
+    const senderRole = role === 'client' ? 'agent' : 'client';
+    const incoming = { sender, sender_role: senderRole, sender_id: 'sender-one', own: false };
+    const own = { sender: 'Me', sender_role: role, sender_id: f.appState.me.id, own: true, delivery: 'read' };
+    f.messages.push(
+      { ...incoming, id: 'first', seq: 1, body: 'Hello', created_at: at },
+      { ...incoming, id: 'photo', seq: 2, body: 'This photo', created_at: at + 60000, attachment_id: 'image-one', mime: 'image/jpeg', filename: 'photo.jpg', size: 100 },
+      { ...own, id: 'own-first', seq: 3, body: 'Checking', created_at: at + 120000 },
+      { ...own, id: 'own-second', seq: 4, body: 'One moment', created_at: at + 180000 },
+      { ...incoming, id: 'returned', seq: 5, body: 'Thank you', created_at: at + 240000 },
+      { ...incoming, sender_id: 'sender-two', id: 'another-sender', seq: 6, body: 'Another sender with the same display name', created_at: at + 300000 },
+      { ...incoming, sender_id: 'sender-two', id: 'next-day', seq: 7, body: 'Next day', created_at: new Date(2026, 9, 21, 12).getTime() },
+    );
+    await f.window.refresh();
+    const rows = [...f.document.querySelectorAll('.message')];
+    assert.deepEqual(rows.filter(row => row.querySelector('.message-meta')).map(row => row.dataset.messageId), ['first', 'returned', 'another-sender', 'next-day']);
+    for (const id of ['photo', 'own-second']) assert.ok(f.document.querySelector(`[data-message-id="${id}"]`).classList.contains('group-continuation'));
+    for (const [index, row] of rows.entries()) {
+      const time = row.querySelector('.bubble .message-status time');
+      assert.ok(time.textContent.trim()); assert.equal(time.dateTime, new Date(f.messages[index].created_at).toISOString());
+      assert.equal(row.querySelector('.message-meta time'), null);
+      assert.equal(f.window.getComputedStyle(time.parentElement).display, 'inline-flex');
+    }
+    assert.ok(rows[1].classList.contains('image-message')); assert.ok(rows[2].querySelector('.delivery-mark.read'));
+    assert.equal(f.document.querySelectorAll('.day-divider').length, 2);
+  }
+});
+
 test('message deletion controls follow sender ownership and admin permissions', async t => {
   const client = await ui(t, { role: 'client' });
   let noticeTimer;
@@ -331,17 +362,25 @@ test('opening a client camera photo gives staff a full preview and starts a devi
 });
 
 test('live updates preserve existing media DOM elements and unsent drafts', async t => {
-  const f = await ui(t);
-  f.messages.push({ id: 'm1', seq: 1, body: '', sender: 'Client #ABC123', own: false, created_at: Date.now(),
+  const f = await ui(t); const at = new Date(2026, 9, 20, 12).getTime();
+  f.messages.push({ id: 'm1', seq: 1, body: '', sender: 'Client #ABC123', own: false, created_at: at,
     attachment_id: 'media123', filename: 'voice-note.webm', mime: 'audio/webm', size: 1000 });
   await f.window.refresh();
   const audio = f.document.querySelector('audio'); assert.ok(audio);
   f.document.querySelector('#message-input').value = 'My unsent answer';
-  f.messages.push({ id: 'm2', seq: 2, body: 'One more detail', sender: 'Client #ABC123', own: false, created_at: Date.now() });
+  f.messages.push({ id: 'm2', seq: 2, body: 'One more detail', sender: 'Client #ABC123', own: false, created_at: at + 1000 });
   await f.window.refresh();
   assert.equal(f.document.querySelector('audio'), audio);
   assert.equal(f.document.querySelector('#message-input').value, 'My unsent answer');
   assert.equal(f.document.querySelectorAll('.message').length, 2);
+  assert.equal(f.document.querySelectorAll('.message-meta').length, 1);
+  f.appState.messages.unshift({ id: 'earlier', seq: 0, body: 'Earlier message', sender: 'Client #ABC123', own: false, created_at: at - 1000 });
+  f.window.renderMessages(true);
+  assert.equal(f.document.querySelector('audio'), audio);
+  assert.equal(f.document.querySelector('[data-message-id="m1"] .message-meta'), null);
+  assert.ok(f.document.querySelector('[data-message-id="m1"]').classList.contains('group-continuation'));
+  assert.equal(f.document.querySelectorAll('.message-meta').length, 1);
+  assert.equal(f.document.querySelector('#message-input').value, 'My unsent answer');
 });
 
 test('incoming text and image messages do not play the call ringtone', async t => {

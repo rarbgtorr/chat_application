@@ -171,12 +171,15 @@ function renderMessages(prepend = false) {
   const container = $('#messages'); if (!container) return;
   const oldHeight = container.scrollHeight; const scrollTop = container.scrollTop;
   const atBottom = oldHeight - scrollTop - container.clientHeight < 120;
-  const room = selectedRoom(); let lastDay = '';
+  const room = selectedRoom(); let lastDay = '', lastSender = '';
   const savedIds = new Set(state.messages.map(message => message.id));
   const messages = [...state.messages, ...state.pendingMessages.filter(message => message.roomId === state.roomId && !savedIds.has(message.serverId))];
   const rows = messages.map(message => {
-    const day = formatDay(message.created_at); let divider = '';
-    if (day !== lastDay) { lastDay = day; divider = `<div class="day-divider" data-key="day-${esc(day)}">${esc(day)}</div>`; }
+    const day = formatDay(message.created_at), date = new Date(message.created_at), dayKey = date.toDateString(); let divider = '';
+    const senderKey = JSON.stringify([Boolean(message.own), message.sender_role || '', message.sender_id || (message.own ? state.me.id : message.sender)]);
+    const continuation = dayKey === lastDay && senderKey === lastSender;
+    if (dayKey !== lastDay) { lastDay = dayKey; divider = `<div class="day-divider" data-key="day-${esc(dayKey)}">${esc(day)}</div>`; }
+    lastSender = senderKey;
     const deleted = Boolean(message.deleted_at); let attachment = '';
     if (deleted) {
       attachment = '';
@@ -196,12 +199,12 @@ function renderMessages(prepend = false) {
     const delivery = message.pending ? message.failed ? 'failed' : message.serverId ? 'sent' : 'sending' : message.delivery || 'sent';
     const imageMessage = !deleted && Boolean(message.localUrl || (message.attachment_id && !message.attachment_expired && message.mime?.startsWith('image/')));
     const key = message.pending ? `${message.id}-${delivery}` : `${message.id}-${Boolean(message.attachment_expired)}-${message.deleted_at || ''}-${message.deleted_by_me || ''}-${receipt ? delivery : ''}`;
-    const meta = message.own ? '' : `<div class="message-meta"><span>${esc(message.sender)}</span><time>${formatTime(message.created_at)}</time></div>`;
-    const status = `<span class="message-status"><time>${formatTime(message.created_at)}</time>${receipt ? deliveryMark(delivery, message.failed, message.id) : ''}</span>`;
+    const meta = message.own || continuation ? '' : `<div class="message-meta"><span>${esc(message.sender)}</span></div>`;
+    const status = `<span class="message-status"><time datetime="${date.toISOString()}">${formatTime(message.created_at)}</time>${receipt ? deliveryMark(delivery, message.failed, message.id) : ''}</span>`;
     const canDelete = !message.pending && !deleted && (message.own || state.me.role === 'admin');
     const remove = canDelete ? `<button type="button" class="message-delete-trigger" data-delete-options="${esc(message.id)}" aria-label="Delete message" title="Delete message">${icon('trash')}</button>` : '';
     const content = deleted ? `<span class="deleted-message">${icon('deleted')}<em>${message.deleted_by_me ? 'You deleted this message' : 'This message was deleted'}</em></span>` : `${message.body ? `<span class="message-body">${esc(message.body)}</span>` : ''}${attachment}`;
-    return `${divider}<article data-key="${key}" data-message-id="${esc(message.id)}" ${canDelete ? 'data-selectable="true" tabindex="0" aria-keyshortcuts="Shift+F10" title="Press and hold for message actions"' : ''} class="message ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="message-content"><div class="bubble">${content}${status}</div>${remove}</div></article>`;
+    return `${divider}<article data-key="${key}" data-message-id="${esc(message.id)}" ${canDelete ? 'data-selectable="true" tabindex="0" aria-keyshortcuts="Shift+F10" title="Press and hold for message actions"' : ''} class="message ${continuation ? 'group-continuation' : 'group-start'} ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="message-content"><div class="bubble">${content}${status}</div>${remove}</div></article>`;
   }).join('');
   const template = document.createElement('template');
   template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(clientName(room))}. Send a message to get started.`}</p></div>`}`;
@@ -210,6 +213,15 @@ function renderMessages(prepend = false) {
   const freshNodes = [...template.content.children]; const keep = new Set();
   freshNodes.forEach((fresh, index) => {
     const node = existing.get(fresh.dataset.key) || fresh; keep.add(node);
+    if (node !== fresh && node.classList.contains('message')) {
+      // Earlier history can move a group boundary. Update only its label and
+      // spacing so an existing audio/video element keeps playing.
+      for (const name of ['group-start', 'group-continuation']) node.classList.toggle(name, fresh.classList.contains(name));
+      const oldMeta = node.querySelector('.message-meta'), newMeta = fresh.querySelector('.message-meta');
+      if (!newMeta) oldMeta?.remove();
+      else if (!oldMeta) node.prepend(newMeta);
+      else if (oldMeta.textContent !== newMeta.textContent) oldMeta.replaceWith(newMeta);
+    }
     const position = container.children[index] || null;
     if (node !== position) container.insertBefore(node, position);
   });
