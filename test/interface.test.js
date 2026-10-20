@@ -5,6 +5,7 @@ import { JSDOM } from 'jsdom';
 
 const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 const script = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+const themeScript = await readFile(new URL('../public/theme.js', import.meta.url), 'utf8');
 const mediaScript = await readFile(new URL('../public/chat-media.js', import.meta.url), 'utf8');
 const styles = await readFile(new URL('../public/style.css', import.meta.url), 'utf8');
 const serviceWorker = await readFile(new URL('../public/sw.js', import.meta.url), 'utf8');
@@ -14,10 +15,13 @@ const deleteMigration = await readFile(new URL('../supabase/migrations/202610200
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
-async function ui(t, { role = 'agent', link = false, uploadGate = null, messageGate = null, pointerEvents = true, serviceWorker = false } = {}) {
+async function ui(t, { role = 'agent', link = false, uploadGate = null, messageGate = null, pointerEvents = true, serviceWorker = false, savedTheme = null, storageBlocked = false } = {}) {
   const roomId = 'room123'; const calls = []; const messages = [];
   const dom = new JSDOM(html, { url: `http://localhost:3000/${role === 'client' ? `c/${roomId}${link ? '#key=private-secret' : ''}` : '?room=room123'}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
+  if (savedTheme !== null) window.localStorage.setItem('wingfactor-chat-theme', savedTheme);
+  if (storageBlocked) Object.defineProperty(window, 'localStorage', { get() { throw new Error('Storage blocked'); } });
+  window.eval(themeScript);
   const stylesheet = window.document.createElement('style'); stylesheet.textContent = styles; window.document.head.append(stylesheet);
   if (!pointerEvents) window.PointerEvent = undefined;
   const errors = []; window.addEventListener('error', event => errors.push(event.error?.message || event.message));
@@ -64,6 +68,66 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null, messageG
   t.after(() => { dom.window.close(); assert.deepEqual(errors, [], 'Unexpected UI error'); });
   return { window, document: window.document, calls, messages, room, appState: window.testAppState };
 }
+
+test('all roles can change appearance without losing their draft or recreating the chat', async t => {
+  for (const role of ['client', 'agent', 'admin']) {
+    const f = await ui(t, { role });
+    const input = f.document.querySelector('#message-input'); input.value = 'My unsent draft';
+    const header = f.document.querySelector('.chat-header');
+    const logo = f.document.querySelector('.support-logo');
+    f.document.querySelector('.chat-header [data-action="settings"]').click();
+    assert.equal(f.document.querySelector('[data-theme-choice="normal"]').getAttribute('aria-pressed'), 'true');
+    f.document.querySelector('[data-theme-choice="dark"]').click();
+    assert.equal(f.document.documentElement.dataset.theme, 'dark');
+    assert.equal(f.document.querySelector('meta[name="color-scheme"]').content, 'only dark');
+    assert.equal(f.window.localStorage.getItem('wingfactor-chat-theme'), 'dark');
+    assert.equal(f.document.querySelector('[data-theme-choice="dark"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(f.window.getComputedStyle(header).backgroundColor, 'rgb(24, 39, 31)');
+    assert.equal(f.window.getComputedStyle(f.document.querySelector('.composer')).backgroundColor, 'rgb(28, 46, 35)');
+    assert.equal(f.document.querySelector('#message-input'), input);
+    assert.equal(input.value, 'My unsent draft');
+    assert.equal(f.document.querySelector('.chat-header'), header);
+    if (logo) {
+      assert.equal(f.document.querySelector('.support-logo'), logo);
+      assert.equal(logo.getAttribute('src'), '/icon.svg');
+      assert.equal(f.window.getComputedStyle(logo).colorScheme, 'only light');
+      assert.equal(f.window.getComputedStyle(logo).filter, 'none');
+    }
+    f.document.querySelector('[data-action="close-modal"]').click();
+    f.document.querySelector('.chat-header [data-action="settings"]').click();
+    assert.equal(f.document.querySelector('[data-theme-choice="dark"]').getAttribute('aria-pressed'), 'true');
+    f.document.querySelector('[data-theme-choice="normal"]').click();
+    assert.equal(f.document.documentElement.dataset.theme, 'normal');
+    assert.equal(f.window.localStorage.getItem('wingfactor-chat-theme'), 'normal');
+    assert.equal(f.document.querySelector('meta[name="color-scheme"]').content, 'only light');
+    assert.equal(f.window.getComputedStyle(f.document.querySelector('.composer')).backgroundColor, 'rgb(255, 255, 255)');
+  }
+});
+
+test('appearance restores on a new page and follows changes from another tab', async t => {
+  const f = await ui(t, { savedTheme: 'dark' });
+  assert.equal(f.document.documentElement.dataset.theme, 'dark');
+  f.window.dispatchEvent(new f.window.StorageEvent('storage', { key: 'wingfactor-chat-theme', newValue: 'normal' }));
+  assert.equal(f.document.documentElement.dataset.theme, 'normal');
+  f.window.dispatchEvent(new f.window.StorageEvent('storage', { key: 'unrelated', newValue: 'dark' }));
+  assert.equal(f.document.documentElement.dataset.theme, 'normal');
+  f.window.dispatchEvent(new f.window.StorageEvent('storage', { key: 'wingfactor-chat-theme', newValue: 'dark' }));
+  assert.equal(f.document.documentElement.dataset.theme, 'dark');
+  f.window.dispatchEvent(new f.window.StorageEvent('storage', { key: null }));
+  assert.equal(f.document.documentElement.dataset.theme, 'normal');
+  const invalid = await ui(t, { savedTheme: 'invalid' });
+  assert.equal(invalid.document.documentElement.dataset.theme, 'normal');
+});
+
+test('appearance works when browser storage is blocked and is available before sign-in', async t => {
+  const f = await ui(t, { storageBlocked: true });
+  f.window.auth();
+  assert.ok(f.document.querySelector('#login-form'));
+  f.document.querySelector('[data-theme-choice="dark"]').click();
+  assert.equal(f.document.documentElement.dataset.theme, 'dark');
+  f.document.querySelector('[data-theme-choice="normal"]').click();
+  assert.equal(f.document.documentElement.dataset.theme, 'normal');
+});
 
 test('teammate screen uses the admin client name and exposes notes without contact details', async t => {
   const f = await ui(t);
