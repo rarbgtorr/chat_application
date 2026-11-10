@@ -107,3 +107,30 @@ test('hidden app rings only for server-authorized calls, including a push during
  serverCalls=[];await media.sync();assert.equal(stops,2);
  await media.sync();assert.equal(rings,2);
 });
+
+test('outgoing voice and video calls display Calling until the recipient app acknowledges them', async t => {
+ const dom=new JSDOM('<dialog id="modal"></dialog>',{pretendToBeVisual:true});
+ const original=new Map(['window','document','navigator'].map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+ for(const [key,value] of Object.entries({window:dom.window,document:dom.window.document,navigator:dom.window.navigator}))Object.defineProperty(globalThis,key,{configurable:true,value});
+ window.HTMLMediaElement.prototype.play=async()=>{};
+ const fixturePeer=fixture({videoStream:true});
+ const {PeerConnection,mediaDevices}=fixturePeer.voice;
+ Object.defineProperty(navigator,'mediaDevices',{value:mediaDevices});
+ window.RTCPeerConnection=PeerConnection;
+ let recipientRinging=false, mediaType;
+ const media=installMedia({api:async()=>[],post:async(_path,request)=>{
+   if(request.action==='start')mediaType=request.payload.media;
+   return {id:request.callId,roomId:'room-one',media:mediaType,status:request.action==='end'?'cancelled':'ringing',incoming:false,recipientRinging};
+ },config:{},room:()=>null,preview(){},modal(){},dismiss(){},toast(){},recording:()=>false,ring(){}});
+ t.after(()=>{media.close();dom.window.close();for(const [key,descriptor] of original){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}});
+ for(const kind of ['voice','video']){
+   recipientRinging=false;
+   await media.call('room-one',kind);
+   assert.equal(document.querySelector('#call-panel strong').textContent,'Calling…');
+   recipientRinging=true;
+   await media.sync();
+   assert.equal(document.querySelector('#call-panel strong').textContent,'Ringing…');
+   document.querySelector('[data-call-action="end"]').click();
+   await new Promise(setImmediate);
+ }
+});

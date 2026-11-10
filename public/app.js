@@ -153,10 +153,14 @@ function renderList() {
   if (!$('#room-list')) return;
   const rooms = state.rooms.filter(r => {
     const query = `${r.code} ${clientName(r)} ${r.private?.contact || ''}`.toLowerCase();
-    return query.includes(state.search.toLowerCase()) && (state.filter === 'unread' ? r.unread > 0 :
-      state.filter === 'waiting' ? Boolean(r.waitingSince) && r.status === 'open' : state.filter === 'closed' ? r.status === 'closed' : true);
+    if (!query.includes(state.search.toLowerCase())) return false;
+    if (state.filter === 'closed') return r.status === 'closed';
+    if (r.status !== 'open') return false;
+    if (state.filter === 'unread') return r.unread > 0;
+    if (state.filter === 'waiting') return Boolean(r.waitingSince);
+    return true;
   }).sort((a, b) => (b.last?.created_at || b.created_at) - (a.last?.created_at || a.created_at));
-  $('#room-list').innerHTML = rooms.map(room => `<button class="room-item ${room.id === state.roomId ? 'selected' : ''}" data-room="${room.id}"><span class="avatar">${initials(clientName(room))}</span><span class="room-info"><span class="room-top"><strong>${esc(clientName(room))}</strong><time>${age(room.last?.created_at || room.created_at)}</time></span><span class="room-preview">${esc(room.last?.body || 'Your conversation starts here.')}</span><span class="room-bottom"><span class="tag ${room.waitingSince ? 'waiting' : ''}">${room.status === 'closed' ? 'Closed' : room.waitingSince ? 'Awaiting reply' : 'Open'}</span>${room.unread ? `<span class="count">${room.unread}</span>` : `<small>${esc(room.agents.map(a => a.name).join(', ') || 'Unassigned')}</small>`}</span></span></button>`).join('') || `<div class="empty-list">${state.rooms.length ? 'No matching conversations.' : 'No conversations yet.<br>' + (state.me.role === 'admin' ? 'Create a room and share the private link.' : 'Your assigned conversations will appear here.')}</div>`;
+  $('#room-list').innerHTML = rooms.map(room => `<button class="room-item ${room.id === state.roomId ? 'selected' : ''}" data-room="${room.id}"><span class="avatar">${initials(clientName(room))}</span><span class="room-info"><span class="room-top"><strong>${esc(clientName(room))}</strong>${state.me.role === 'admin' && room.notificationsMuted ? '<span class="tag">Muted</span>' : ''}<time>${age(room.last?.created_at || room.created_at)}</time></span><span class="room-preview">${esc(room.last?.body || 'Your conversation starts here.')}</span><span class="room-bottom"><span class="tag ${room.waitingSince ? 'waiting' : ''}">${room.status === 'closed' ? 'Closed' : room.waitingSince ? 'Awaiting reply' : 'Open'}</span>${room.unread ? `<span class="count">${room.unread}</span>` : `<small>${esc(room.agents.map(a => a.name).join(', ') || 'Unassigned')}</small>`}</span></span></button>`).join('') || `<div class="empty-list">${state.rooms.length ? 'No matching conversations.' : 'No conversations yet.<br>' + (state.me.role === 'admin' ? 'Create a room and share the private link.' : 'Your assigned conversations will appear here.')}</div>`;
   $('#list-count').textContent = `${state.rooms.length} conversation${state.rooms.length === 1 ? '' : 's'} · history stays saved`;
 }
 function renderChat() {
@@ -322,10 +326,7 @@ async function refresh() {
       if (closed !== !Boolean($('#message-form'))) renderChat();
       await loadMessages(state.roomId);
     }
-    if (state.me.role !== 'client') {
-      state.alerts = await api('/api/alerts');
-      if ($('#alert-count')) { $('#alert-count').textContent = state.alerts.length; $('#alert-count').classList.toggle('hidden', !state.alerts.length); }
-    }
+    if (state.me.role !== 'client') await refreshAlerts();
   } catch (error) {
     if (error.status === 401) auth('Your access changed. Please sign in again.');
     else { connection(false); }
@@ -453,12 +454,25 @@ function showLink(link) {
 }
 async function roomSettings() {
   const room = selectedRoom(); if (!room) return; state.users = await api('/api/users');
-  modal(clientName(room), `<form id="edit-room-form"><p class="modal-description">Assigned teammates can see the client name and support notes. Contact details stay administrator-only.</p><label class="field"><span>Client name</span><input name="name" value="${esc(room.private?.name)}" maxlength="100"></label><label class="field"><span>Phone or email · admin only</span><input name="contact" value="${esc(room.private?.contact)}" maxlength="200"></label><label class="field"><span>Support notes · visible to teammates</span><textarea name="notes" maxlength="2000">${esc(room.private?.notes)}</textarea></label><label class="field"><span>Assigned teammates</span>${agentChecks(room.agents.map(a => a.id))}</label><div class="error form-error"></div><div class="modal-actions"><button class="primary" type="submit">Save changes</button></div></form><div class="section-label">Conversation controls</div><div class="settings-row"><button class="secondary" data-action="rotate-link">Replace access link</button><button class="secondary" data-action="revoke-link">Revoke client access</button><button class="secondary" data-action="toggle-room">${room.status === 'open' ? 'Close conversation' : 'Reopen conversation'}</button></div><div class="settings-note">Closing keeps all messages and files. Deleting permanently removes this room, its history, and its attachments.</div><div class="modal-actions"><button class="danger" data-action="delete-room">Delete permanently</button></div>`);
+  modal(clientName(room), `<form id="edit-room-form"><p class="modal-description">Assigned teammates can see the client name and support notes. Contact details stay administrator-only.</p><label class="field"><span>Client name</span><input name="name" value="${esc(room.private?.name)}" maxlength="100"></label><label class="field"><span>Phone or email · admin only</span><input name="contact" value="${esc(room.private?.contact)}" maxlength="200"></label><label class="field"><span>Support notes · visible to teammates</span><textarea name="notes" maxlength="2000">${esc(room.private?.notes)}</textarea></label><label class="field"><span>Assigned teammates</span>${agentChecks(room.agents.map(a => a.id))}</label><div class="error form-error"></div><div class="modal-actions"><button class="primary" type="submit">Save changes</button></div></form><div class="section-label">Conversation controls</div><div class="settings-row"><button class="secondary" type="button" data-action="toggle-room-mute" data-mute-room="${room.id}">${room.notificationsMuted ? 'Unmute notifications' : 'Mute notifications'}</button><button class="secondary" data-action="rotate-link">Replace access link</button><button class="secondary" data-action="revoke-link">Revoke client access</button><button class="secondary" data-action="toggle-room">${room.status === 'open' ? 'Close conversation' : 'Reopen conversation'}</button></div><div class="settings-note">Closing keeps all messages and files. Deleting permanently removes this room, its history, and its attachments.</div><div class="modal-actions"><button class="danger" data-action="delete-room">Delete permanently</button></div>`);
+}
+function renderAlerts() {
+  const list = $('#alert-list');
+  if (!$('#modal').open || !list) return;
+  list.innerHTML = state.alerts.map(alert => `<div class="alert-row"><span class="tag ${alert.kind === 'escalation' ? 'waiting' : ''}">${esc(alert.kind)}</span> <strong>${esc(alert.code)}</strong><p>${esc(alert.body)} · ${age(alert.created_at)}</p><button class="secondary" data-alert-room="${alert.room_id}">Open conversation</button></div>`).join('') || '<div class="settings-note">All caught up. New alerts will appear here.</div>';
+}
+async function refreshAlerts() {
+  state.alerts = await api('/api/alerts');
+  const count = $('#alert-count');
+  if (count) { count.textContent = state.alerts.length; count.classList.toggle('hidden', !state.alerts.length); }
+  renderAlerts();
 }
 async function showAlerts() {
-  state.alerts = await api('/api/alerts');
-  modal('Notifications', `<p class="modal-description">Unread updates and unanswered-client reminders.</p>${state.alerts.map(alert => `<div class="alert-row"><span class="tag ${alert.kind === 'escalation' ? 'waiting' : ''}">${esc(alert.kind)}</span> <strong>${esc(alert.code)}</strong><p>${esc(alert.body)} · ${age(alert.created_at)}</p><button class="secondary" data-alert-room="${alert.room_id}">Open conversation</button></div>`).join('') || '<div class="settings-note">All caught up. New alerts will appear here.</div>'}<div class="modal-actions"><button class="secondary" data-action="clear-alerts">Mark alerts as seen</button></div>`);
+  await refreshAlerts();
+  modal('Notifications', '<p class="modal-description">Unread updates and unanswered-client reminders.</p><div id="alert-list"></div><div class="modal-actions"><button class="secondary" data-action="clear-alerts">Mark alerts as seen</button></div>');
+  renderAlerts();
 }
+
 function removePendingMessage(id, rerender = true) {
   const pending = state.pendingMessages.find(message => message.id === id);
   if (!pending) return;
@@ -684,11 +698,34 @@ document.addEventListener('click', async event => {
       case 'clear-alerts': await post('/api/alerts/read'); dismiss(); await refresh(); break;
       case 'create-room': await createRoom(); break;
       case 'room-settings': await roomSettings(); break;
+      case 'toggle-room-mute': {
+        const room = state.rooms.find(room => room.id === button.dataset.muteRoom);
+        if (!room || state.me.role !== 'admin' || button.disabled) break;
+        const notificationsMuted = !room.notificationsMuted;
+        button.disabled = true;
+        try {
+          await api(`/api/rooms/${room.id}`, { method: 'PATCH', body: JSON.stringify({ notificationsMuted }) });
+          const current = state.rooms.find(item => item.id === room.id);
+          if (current) current.notificationsMuted = notificationsMuted;
+          button.textContent = notificationsMuted ? 'Unmute notifications' : 'Mute notifications';
+          renderList();
+          toast(notificationsMuted ? 'Notifications muted for this chat.' : 'Notifications unmuted for this chat.');
+        } finally { button.disabled = false; }
+        break;
+      }
       case 'client-notes': { const room=selectedRoom(); modal(`${clientName(room)} · notes`, `<p class="note-content">${clientNotes(room) ? esc(clientNotes(room)) : 'No support notes have been added.'}</p>`); break; }
       case 'copy-link': await navigator.clipboard.writeText($('#client-link').textContent); toast('Private link copied.'); break;
       case 'rotate-link': if (confirm('Replace the client link? Their old link and sessions will stop working.')) { const result = await post(`/api/rooms/${state.roomId}/link`); showLink(result.link); } break;
       case 'revoke-link': if (confirm('Revoke all client access to this conversation? History stays saved.')) { await post(`/api/rooms/${state.roomId}/revoke`); dismiss(); toast('Client access revoked.'); } break;
-      case 'toggle-room': await api(`/api/rooms/${state.roomId}`, { method: 'PATCH', body: JSON.stringify({ status: selectedRoom().status === 'open' ? 'closed' : 'open' }) }); dismiss(); await refresh(); renderChat(); break;
+      case 'toggle-room': {
+        const status = selectedRoom().status === 'open' ? 'closed' : 'open';
+        await api(`/api/rooms/${state.roomId}`, { method: 'PATCH', body: JSON.stringify({ status }) });
+        dismiss();
+        state.filter = status === 'closed' ? 'closed' : 'all';
+        document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('active', b.dataset.filter === state.filter));
+        await refresh();
+        break;
+      }
       case 'delete-room': if (confirm('Permanently delete this conversation and all its messages and files? This cannot be undone.')) { await api(`/api/rooms/${state.roomId}`, { method: 'DELETE' }); dismiss(); state.roomId = null; await refresh(); renderChat(); } break;
       case 'voice-call': await state.media?.call(state.roomId); break;
       case 'video-call': await state.media?.call(state.roomId, 'video'); break;

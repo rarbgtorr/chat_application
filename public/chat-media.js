@@ -47,7 +47,11 @@ export function installMedia({api,post,config,room,preview,modal,dismiss,toast,r
     host.classList.toggle('hidden',!c);host.classList.toggle('video-call',c?.media==='video');if(!c){host.replaceChildren();return;}
     const incoming=c.incoming&&c.status==='ringing',video=c.media==='video',kind=video?'video':'voice';
     host.innerHTML=`${video?'<div class="call-videos"><video id="call-remote-video" autoplay playsinline></video><video id="call-local-video" autoplay playsinline muted></video></div>':''}<div class="call-summary"><strong></strong><p></p></div><div class="call-actions"></div>`;
-    host.querySelector('strong').textContent=incoming?`Incoming ${kind} call`:c.status==='active'?`${video?'Video':'Voice'} call connected`:c.status==='connecting'?`Connecting ${kind} call…`:`Calling with ${kind}…`;
+    const statusText = incoming ? `Incoming ${kind} call`
+      : c.status === 'active' ? `${video ? 'Video' : 'Voice'} call connected`
+      : c.status === 'connecting' ? `Connecting ${kind} call…`
+      : c.status === 'ringing' && c.recipientRinging ? 'Ringing…' : 'Calling…';
+    host.querySelector('strong').textContent = statusText;
     const name=room(c.roomId)?.code||'Support conversation';host.querySelector('p').textContent=name+(c.connectedAt?' · '+Math.max(0,Math.floor((Date.now()-c.connectedAt)/1000))+'s':'');
     const add=(text,action,style)=>{const b=document.createElement('button');b.textContent=text;b.className=style||'secondary';b.dataset.callAction=action;host.querySelector('.call-actions').append(b);};
     if(incoming){add(video?'Answer with video':'Answer','answer','primary');add('Decline','end','danger');}

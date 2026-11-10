@@ -16,7 +16,7 @@ const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
 async function ui(t, { role = 'agent', link = false, uploadGate = null, messageGate = null, pointerEvents = true, serviceWorker = false, savedTheme = null, storageBlocked = false } = {}) {
-  const roomId = 'room123'; const calls = []; const messages = [];
+  const roomId = 'room123'; const calls = []; const messages = []; const alerts = [];
   const dom = new JSDOM(html, { url: `http://localhost:3000/${role === 'client' ? `c/${roomId}${link ? '#key=private-secret' : ''}` : '?room=room123'}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
   if (savedTheme !== null) window.localStorage.setItem('wingfactor-chat-theme', savedTheme);
@@ -39,12 +39,16 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null, messageG
     agents: [{ id: 'agent123', name: 'Support teammate' }], waitingSince: null,
     ...(role === 'agent' ? { client: { name: 'Visible Client', notes: 'Keep the client updated every hour.' } } : {}),
     ...(role === 'admin' ? { private: { name: 'ADMIN-ONLY CLIENT', contact: 'SECRET-PHONE', notes: 'PRIVATE' } } : {}) };
+  const rooms = [room];
   window.fetch = async (path, options = {}) => {
     const data = options.body && !(options.body instanceof window.Blob) ? JSON.parse(options.body) : null;
     calls.push({ path, method: options.method || 'GET', data });
     let result;
     if (path === '/api/me') result = { user: { id: role === 'client' ? roomId : 'agent123', name: 'Support teammate', role, roomId: role === 'client' ? roomId : undefined }, push: { enabled: false, devices: 0 } };
-    else if (path === '/api/rooms') result = [room];
+    else if (path === '/api/rooms') result = rooms.map(item => ({ ...item }));
+    else if (path.startsWith('/api/rooms/') && options.method === 'PATCH') {
+      Object.assign(rooms.find(item => item.id === path.split('/').at(-1)), data); result = { ok: true };
+    }
     else if (path.endsWith('/upload') && options.method === 'POST') {
       uploadedFile = options.body; if (uploadGate) await uploadGate; result = { attachmentId: 'attachment123' };
     } else if (path.endsWith('/messages') && options.method === 'POST') {
@@ -59,14 +63,15 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null, messageG
       result = { ok: true, deletedAt };
     } else if (path.includes('/messages')) result = { messages: [...messages], hasMore: false };
     else if (path === '/api/client/session') result = { roomId };
-    else if (path === '/api/alerts') result = [];
+    else if (path === '/api/alerts') result = [...alerts];
+    else if (path === '/api/users') result = [];
     else result = { ok: true };
     return { ok: true, status: 200, json: async () => result };
   };
   window.eval(script + '\nwindow.testAppState = state;');
   await until(() => window.document.querySelector('#message-form'));
   t.after(() => { dom.window.close(); assert.deepEqual(errors, [], 'Unexpected UI error'); });
-  return { window, document: window.document, calls, messages, room, appState: window.testAppState };
+  return { window, document: window.document, calls, messages, room, rooms, alerts, appState: window.testAppState };
 }
 
 test('all roles can change appearance without losing their draft or recreating the chat', async t => {
@@ -643,4 +648,56 @@ test('expired media keeps its message and shows an expiry marker without a downl
   assert.match(f.document.querySelector('.bubble').textContent, /Please review this document/);
   assert.match(f.document.querySelector('.attachment').textContent, /Attachment expired/);
   assert.equal(f.document.querySelector('.attachment a'), null);
+});
+
+test('staff inbox separates closed chats from open, unread and waiting chats', async t => {
+  for (const role of ['admin', 'agent']) {
+    const { document, rooms, room, window } = await ui(t, { role });
+    Object.assign(room, { unread: 2, waitingSince: Date.now() });
+    rooms.push({ ...room, id: 'closed123', status: 'closed' });
+    window.testEventStream.listeners.change();
+    await until(() => document.querySelector('[data-room="room123"] .count')?.textContent === '2');
+    const listed = () => [...document.querySelectorAll('[data-room]')].map(button => button.dataset.room);
+    for (const filter of ['all', 'unread', 'waiting']) {
+      document.querySelector(`[data-filter="${filter}"]`).click();
+      assert.deepEqual(listed(), ['room123']);
+    }
+    document.querySelector('[data-filter="closed"]').click();
+    assert.deepEqual(listed(), ['closed123']);
+  }
+});
+
+test('admin can mute a single chat and unmute it without losing room settings edits', async t => {
+  const { document, room, rooms, calls, window } = await ui(t, { role: 'admin' });
+  rooms.push({ ...room, id: 'other123' });
+  document.querySelector('[data-action="room-settings"]').click();
+  await until(() => document.querySelector('[data-action="toggle-room-mute"]'));
+  const button = document.querySelector('[data-action="toggle-room-mute"]');
+  const draft = document.querySelector('#edit-room-form [name="notes"]');
+  draft.value = 'Unsent note';
+  button.click();
+  await until(() => button.textContent === 'Unmute notifications');
+  assert.deepEqual(calls.find(call => call.method === 'PATCH')?.data, { notificationsMuted: true });
+  assert.equal(room.notificationsMuted, true);
+  assert.equal(rooms[1].notificationsMuted, undefined);
+  assert.equal(draft.value, 'Unsent note');
+  button.click();
+  await until(() => button.textContent === 'Mute notifications');
+  assert.equal(room.notificationsMuted, false);
+
+  document.querySelector('[data-action="toggle-room"]').click();
+  await until(() => document.querySelector('[data-filter="closed"]').classList.contains('active'));
+  await until(() => document.querySelector('[data-room="room123"] .tag')?.textContent === 'Closed');
+  assert.equal(window.testAppState.filter, 'closed');
+});
+
+test('an open notifications panel clears escalations on the next server update', async t => {
+  const { document, window, alerts } = await ui(t, { role: 'admin' });
+  alerts.push({ room_id: 'room123', kind: 'escalation', code: 'Member chat', body: 'Member is waiting.', created_at: Date.now() });
+  document.querySelector('[data-action="alerts"]').click();
+  await until(() => document.querySelector('#alert-list .alert-row'));
+  alerts.length = 0;
+  window.testEventStream.listeners.change();
+  await until(() => document.querySelector('#alert-list').textContent.includes('All caught up.'));
+  assert.equal(document.querySelector('#modal').open, true);
 });

@@ -66,11 +66,18 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
    if(job.kind==='call'){const call=await one('calls','id',job.cycle_id);if(!call||call.status!=='ringing'||call.expires_at<=clock()){await remove('push_jobs','id',job.id);return;}}
    const sub=await one('subscriptions','endpoint',job.endpoint);const a=sub&&await actor(sub.session_hash);
    if(!a||(job.room_id&&!await rpc('allowed',{p_token:a.sessionHash,p_room:job.room_id}))){await remove('push_jobs','id',job.id);return;}
+   if(job.room_id&&a.role==='admin'&&await notificationsMuted(a.id,job.room_id)){
+    await remove('push_jobs','id',job.id);return;
+   }
+   if(['reminder','escalation'].includes(job.kind)){
+    const [room,cycle]=await Promise.all([one('rooms','id',job.room_id),one('cycles','room_id',job.room_id)]);
+    if(room?.status!=='open'||cycle?.first_message_id!==job.cycle_id){await remove('push_jobs','id',job.id);return;}
+   }
    if(['message','reply'].includes(job.kind)){
     const visible=await result(table('activity').select('tab_id').eq('session_hash',a.sessionHash).eq('room_id',job.room_id).gt('expires_at',clock()).limit(1));
     if(visible.length){
-     let latest=table('messages').select('seq').eq('room_id',job.room_id).is('deleted_at',null);
-     latest=a.role==='client'?latest.in('sender_role',['admin','agent']):latest.eq('sender_role','client');
+     const latest=table('messages').select('seq').eq('room_id',job.room_id).is('deleted_at',null)
+      .in('sender_role',['client','admin','agent']).neq('sender_id',a.id);
      const [messages,reads]=await Promise.all([result(latest.order('seq',{ascending:false}).limit(1)),result(table('reads').select('seq').eq('room_id',job.room_id).eq('subject',a.role==='client'?'client:'+job.room_id:a.id))]);
      if((reads[0]?.seq||0)>=(messages[0]?.seq||0)){await remove('push_jobs','id',job.id);return;}
     }
@@ -79,17 +86,22 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
    catch(e){if([404,410].includes(e.statusCode))await remove('subscriptions','endpoint',job.endpoint);else await patch('push_jobs','id',job.id,{attempts:job.attempts+1,leased_until:0,next_at:clock()+Math.min(300000,1000*2**Math.min(8,job.attempts+1))});}
   }));
  }
- async function summary(a,room){
+ async function notificationsMuted(userId,roomId){
+  const rows=await result(table('notification_mutes').select('room_id').eq('user_id',userId).eq('room_id',roomId).limit(1));
+  return rows.length>0;
+ }
+ async function summary(a,room,mutedRooms){
   const [last,marker,assigned,cycle]=await Promise.all([
    result(table('messages').select('body,created_at,sender_role,attachment_id,deleted_at').eq('room_id',room.id).order('seq',{ascending:false}).limit(1)),
    result(table('reads').select('seq').eq('room_id',room.id).eq('subject',a.role==='client'?'client:'+room.id:a.id)),agents(room.id),one('cycles','room_id',room.id)]);
-  let unread=table('messages').select('seq',{count:'exact',head:true}).eq('room_id',room.id).is('deleted_at',null).gt('seq',marker[0]?.seq||0);
-  unread=a.role==='client'?unread.neq('sender_role','client'):unread.eq('sender_role','client');
+  const unread=table('messages').select('seq',{count:'exact',head:true}).eq('room_id',room.id).is('deleted_at',null).gt('seq',marker[0]?.seq||0);
+  if(a.role==='client')unread.neq('sender_role','client');
+  else unread.in('sender_role',['client','admin','agent']).neq('sender_id',a.id);
   const count=await unread;
   const r={...room,last:last[0]?{...last[0],body:last[0].deleted_at?'This message was deleted':last[0].body||'Attachment'}:null,unread:count.count||0,agents:assigned,waitingSince:cycle?.first_at||null};
   if(a.role!=='client'){
    const details=await one('contacts','room_id',room.id);
-   if(a.role==='admin')r.private=details;
+   if(a.role==='admin'){r.private=details;r.notificationsMuted=mutedRooms.has(room.id);}
    else r.client={name:details?.name||'',notes:details?.notes||''};
   }
   return r;
@@ -103,7 +115,8 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
    if(path==='/worker'){
     check(method==='POST'&&req.headers.get('x-worker-key')===config.workerKey,403,'Forbidden.');await worker(config);return reply({ok:true});
    }
-   if(!['GET','HEAD'].includes(method))check(req.headers.get('origin')===config.origin,403,'Request origin not allowed.');
+   const origin=req.headers.get('origin');
+   if(!['GET','HEAD'].includes(method))check(origin&&(origin===config.origin||origin===config.alternateOrigin),403,'Request origin not allowed.');
    const cookieToken=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(cookieName+'='))?.slice(cookieName.length+1);
    const sessionCookie=token=>headers.append('Set-Cookie',`${cookieName}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=31536000`);
    async function session(userId,roomId){const token=secret();await put('sessions',{token_hash:hash(token),user_id:userId,room_id:roomId,live_key:'wc-'+secret(),created_at:clock()});sessionCookie(token);}
@@ -167,7 +180,10 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
      let q=table('rooms').select('*').order('created_at',{ascending:false});
      if(a.role==='client')q=q.eq('id',a.roomId);
      else if(a.role!=='admin'){const assigned=await result(table('assignments').select('room_id').eq('user_id',a.id));if(!assigned.length)return reply([]);q=q.in('id',assigned.map(x=>x.room_id));}
-     return reply(await Promise.all((await result(q)).map(r=>summary(a,r))));
+     const [rooms,mutes]=await Promise.all([result(q),a.role==='admin'
+      ? result(table('notification_mutes').select('room_id').eq('user_id',a.id)) : []]);
+     const mutedRooms=new Set(mutes.map(m=>m.room_id));
+     return reply(await Promise.all(rooms.map(r=>summary(a,r,mutedRooms))));
     }
     if(method==='POST'){
      admin(a);const d=await json(req),roomId=id(),key=secret(),code='Client #'+secret().slice(0,6).toUpperCase();const chosen=d.agentIds||[];check(Array.isArray(chosen)&&chosen.length<=50,400,'Invalid teammates.');
@@ -175,7 +191,7 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
      await put('rooms',{id:roomId,code,created_at:clock()});
      await put('contacts',{room_id:roomId,name:str(d.name,100),contact:str(d.contact,200),notes:str(d.notes,2000)});await put('keys',{room_id:roomId,key_hash:hash(key)});
      if(chosen.length)await put('assignments',[...new Set(chosen)].map(uid=>({room_id:roomId,user_id:uid})));
-     await signal(roomId);return reply({roomId,code,link:`${config.origin}/c/${roomId}#key=${key}`},201);
+     await signal(roomId);return reply({roomId,code,link:`${origin}/c/${roomId}#key=${key}`},201);
     }
    }
    const messageMatch=/^\/rooms\/([\w-]+)\/messages\/([\w-]+)$/.exec(path);
@@ -188,13 +204,17 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
     if(!action&&method==='DELETE'){admin(a);await rpc('room_delete',{p_token:a.sessionHash,p_room:roomId});await cleanup();return reply({ok:true});}
     if(!action&&method==='PATCH'){
      admin(a);const d=await json(req);
+     if(d.notificationsMuted!==undefined){
+      check(typeof d.notificationsMuted==='boolean',400,'Invalid notification preference.');
+      await rpc('set_notification_mute',{p_token:a.sessionHash,p_room:roomId,p_muted:d.notificationsMuted});
+     }
      if(d.status!==undefined){check(['open','closed'].includes(d.status),400,'Invalid status.');await patch('rooms','id',roomId,{status:d.status});if(d.status==='closed'){await remove('cycles','room_id',roomId);await result(table('push_jobs').delete().eq('room_id',roomId).in('kind',['reminder','escalation']));}}
      if(d.private)await patch('contacts','room_id',roomId,{name:str(d.private.name,100),contact:str(d.private.contact,200),notes:str(d.private.notes,2000)});
      if(d.agentIds){check(Array.isArray(d.agentIds)&&d.agentIds.length<=50,400,'Invalid teammates.');for(const uid of d.agentIds){const u=await one('users','id',uid);check(u&&u.role==='agent'&&!u.disabled,400,'Choose active teammates.');}const old=await agents(roomId);await remove('assignments','room_id',roomId);if(d.agentIds.length)await put('assignments',[...new Set(d.agentIds)].map(uid=>({room_id:roomId,user_id:uid})));for(const uid of d.agentIds.filter(uid=>!old.some(u=>u.id===uid)))await notify(uid,roomId,'assigned','Assigned · '+room.code,'A support conversation has been assigned to you.');}
      await signal(null);waitUntil(worker(config));return reply({ok:true});
     }
     if(['link','revoke'].includes(action)&&method==='POST'){
-     admin(a);const key=secret();await remove('keys','room_id',roomId);await remove('sessions','room_id',roomId);if(action==='link')await put('keys',{key_hash:hash(key),room_id:roomId});await signal(null);return reply(action==='link'?{link:`${config.origin}/c/${roomId}#key=${key}`}:{ok:true});
+     admin(a);const key=secret();await remove('keys','room_id',roomId);await remove('sessions','room_id',roomId);if(action==='link')await put('keys',{key_hash:hash(key),room_id:roomId});await signal(null);return reply(action==='link'?{link:`${origin}/c/${roomId}#key=${key}`}:{ok:true});
     }
     if(action==='messages'&&method==='GET'){
      const before=Number(new URL(req.url).searchParams.get('before'))||Number.MAX_SAFE_INTEGER;
@@ -228,7 +248,9 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
     const {data,error}=await db.storage.from(bucket).createSignedUrl(f.id,Math.max(1,Math.min(60,Math.floor((f.expires_at-clock())/1000))),inline?{}:{download:f.filename});if(error)throw error;
     headers.set('Location',data.signedUrl);return new Response(null,{status:302,headers});
    }
-   if(path==='/alerts'&&method==='GET'){check(a.role!=='client',403,'Staff only.');const alerts=await result(table('alerts').select('*,room:'+prefix+'rooms(code)').eq('user_id',a.id).eq('seen',false).order('created_at',{ascending:false}).limit(100));const visible=[];for(const x of alerts)if(await rpc('allowed',{p_token:a.sessionHash,p_room:x.room_id}))visible.push({...x,code:x.room.code,room:undefined});return reply(visible);}
+   if(path==='/alerts'&&method==='GET'){
+    check(a.role!=='client',403,'Staff only.');return reply(await rpc('pending_alerts',{p_token:a.sessionHash}));
+   }
    if(path==='/alerts/read'&&method==='POST'){check(a.role!=='client',403,'Staff only.');await patch('alerts','user_id',a.id,{seen:true});return reply({ok:true});}
    if(path==='/push'&&method==='POST'){
     const d=await json(req),s=d.subscription;let u;try{u=new URL(s?.endpoint);}catch{}check(u&&u.protocol==='https:'&&!u.port&&!u.username&&!u.password&&(u.hostname==='fcm.googleapis.com'||u.hostname==='updates.push.services.mozilla.com'||u.hostname.endsWith('.push.apple.com'))&&s.endpoint.length<=2048&&/^[\w-]{20,30}$/.test(s.keys?.auth)&&/^[\w-]{80,100}$/.test(s.keys?.p256dh),400,'Invalid browser push subscription.');
