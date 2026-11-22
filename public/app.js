@@ -15,6 +15,8 @@ const icons = {
   logout: '<path d="M9 21H4V3h5m6 14 5-5-5-5M8 12h12"/>',
   search: '<circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/>',
   send: '<path d="m22 2-7 20-4-9L2 9 22 2ZM22 2 11 13"/>',
+  emoji: '<circle cx="12" cy="12" r="9"/><path d="M8 14a4 4 0 0 0 8 0M9 9h.01M15 9h.01"/>',
+  copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 4H6a2 2 0 0 0-2 2v10"/>',
   clip: '<path d="m21 11-9 9a6 6 0 0 1-8-8L14 2a4 4 0 0 1 6 6L9 19a2 2 0 0 1-3-3l10-10"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/>',
@@ -32,7 +34,10 @@ const state = { me: null, rooms: [], users: [], roomId: null, messages: [], hasM
   filter: 'all', search: '', file: null, stream: null, connected: false, alerts: [], push: null,
   recorder: null, recordingTimer: null, loading: false, queuedRefresh: false, sound: null,
   pendingMessages: [], selectedMessageId: null };
-let toastTimer, refreshTimer, messagePress, suppressMessageClick;
+let toastTimer, refreshTimer, messagePress, suppressMessageClick, pushRegistration;
+let messageView = 0, historyLoaded = false, latestRequest = 0, readSeq = 0, pushEndpoint = '';
+let messageRefresh;
+const emojis = '😀 😃 😄 😁 😆 😅 😂 🤣 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😋 😜 🤪 🤔 🤨 😐 😶 😏 😒 🙄 😬 😔 😢 😭 😮 😯 😱 😴 😎 🥳 😤 😡 🫡 🤗 🤭 🫠 👍 👎 👋 🙌 👏 🤝 🙏 💪 👌 ✌️ 🤞 ❤️ 🧡 💛 💚 💙 💜 🤍 💔 🔥 ✨ 🎉 🎂 🎈 💯 ✅ ❌ ⭐ 💬 📎 📷 📞 👀 🚀 ☕ 🌟 💡 🕒'.split(' ');
 const chatActivity = { tabId: crypto.randomUUID(), roomId: null, signature: '', sentAt: 0, typingUntil: 0, chain: Promise.resolve() };
 const typers = new Map();
 function chatIsVisible(roomId = state.roomId) {
@@ -68,7 +73,14 @@ function stopTyping() { chatActivity.typingUntil = 0; reportActivity(true); }
 function toast(message, duration = 5000) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), duration); }
 async function api(path, options = {}) {
   const headers = { ...(options.body && !(options.body instanceof Blob) ? { 'Content-Type': 'application/json' } : {}), ...options.headers };
-  const response = await fetch(path, { ...options, headers, credentials: 'same-origin', cache: 'no-store' });
+  let response;
+  try {
+    response = await fetch(path, { signal: AbortSignal.timeout(options.body instanceof Blob ? 90000 : 15000), ...options, headers, credentials: 'same-origin', cache: 'no-store' });
+  } catch (error) {
+    if (error.name === 'TimeoutError') throw new Error('The chat service took too long to respond. Try again.');
+    if (error instanceof TypeError) throw new Error('Could not reach the chat service. Check your connection and try again.');
+    throw error;
+  }
   let result;
   try { result = await response.json(); }
   catch {
@@ -100,12 +112,39 @@ function clearMessageSelection() {
 }
 function syncMessageSelection() {
   const message = state.messages.find(item => item.id === state.selectedMessageId);
-  if (!message || message.deleted_at || !(message.own || state.me?.role === 'admin')) return clearMessageSelection();
+  if (!message || message.deleted_at || !(message.body || message.own || state.me?.role === 'admin')) return clearMessageSelection();
   document.querySelectorAll('[data-message-id]').forEach(node => node.classList.toggle('selected', node.dataset.messageId === message.id));
 }
 function selectMessage(messageId) {
   state.selectedMessageId = messageId; syncMessageSelection();
-  window.getSelection?.()?.removeAllRanges?.();
+}
+async function copyMessage(messageId) {
+  const message = state.messages.find(item => item.id === messageId);
+  if (!message?.body || message.deleted_at) return;
+  if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(message.body);
+  else {
+    const body = [...document.querySelectorAll('[data-message-id]')].find(node => node.dataset.messageId === messageId)?.querySelector('.message-body');
+    const selection = window.getSelection();
+    if (!body || !selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(body); selection.removeAllRanges(); selection.addRange(range);
+    if (!document.execCommand?.('copy')) { toast('Text selected. Use your device’s copy command.'); return; }
+    selection.removeAllRanges();
+  }
+  clearMessageSelection(); toast('Message copied.', 2000);
+}
+function showEmojis(show) {
+  const picker = $('#emoji-picker'), button = $('[data-action="emoji"]');
+  if (!picker || !button) return;
+  picker.hidden = !show;
+  button.setAttribute('aria-expanded', String(show));
+}
+function insertEmoji(emoji) {
+  const input = $('#message-input');
+  if (!input || input.value.length - (input.selectionEnd - input.selectionStart) + emoji.length > input.maxLength) return;
+  input.setRangeText(emoji, input.selectionStart, input.selectionEnd, 'end');
+  showEmojis(false); input.focus({ preventScroll: true });
+  input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 function initials(name) { return esc(name.split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase()); }
 function cameraPhoto(message) { return message.sender_role === 'client' && /^photo-\d+\.jpe?g$/i.test(message.filename || ''); }
@@ -127,6 +166,9 @@ function appearanceOptions() {
 function auth(error = '') {
   stopTyping(); typers.clear(); chatActivity.signature = '';
   state.stream?.close(); state.media?.close(); state.media=null; state.me = null;
+  messageView++; historyLoaded = false; readSeq = 0; pushEndpoint = '';
+  state.pendingMessages.forEach(message => { if (message.localUrl) URL.revokeObjectURL(message.localUrl); });
+  state.pendingMessages = []; state.messages = []; state.hasMore = false;
   const clientPage = location.pathname.startsWith('/c/');
   $('#app').innerHTML = `<main class="auth"><section class="auth-story">${brand}<div class="eyebrow">A little closer. A lot simpler.</div><h1>Good support<br>starts with a<br><em>conversation.</em></h1><p>One private space for your questions, files, and the people here to help.</p><div class="auth-foot">WINGFACTOR IT SUPPORT<br>Thoughtful support. Connected people.</div></section><section class="auth-form"><div class="auth-form-inner"><div class="auth-appearance">${appearanceOptions()}</div>${clientPage ? `<h2>Your private support space</h2><p>Open the original support link shared with you to access your conversation. If your access was revoked, ask Wingfactor for a new link.</p><div class="error">${esc(error)}</div>` : `<div class="eyebrow muted">Team workspace</div><h2>Welcome back.</h2><p>Sign in to pick up your conversations.</p><form id="login-form"><label class="field"><span>Username</span><input name="username" autocomplete="username" required placeholder="Your team username"></label><label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required placeholder="Enter your password"></label><div class="error" id="login-error">${esc(error)}</div><button class="primary" type="submit">Sign in ${icon('send')}</button></form><div class="auth-note">You’ll stay signed in on this device.<br>Clients: use the private link shared with you.</div>`}</div></section></main>`;
 }
@@ -175,7 +217,7 @@ function renderChat() {
   }
   const client = state.me.role === 'client', displayName = client ? 'Wingfactor Support' : clientName(room);
   const avatar = client ? '<img class="avatar support-logo" src="/icon.svg" width="40" height="40" alt="Wingfactor logo">' : `<span class="avatar">${initials(displayName)}</span>`;
-  $('#conversation').innerHTML = `<header class="chat-header">${!client ? `<span class="mobile-back">${iconButton('back', 'back', 'Back to conversations')}</span>` : ''}${avatar}<div class="chat-title"><h2>${esc(displayName)}</h2>${client ? '' : `<p>${room.agents.length ? `Assigned to ${esc(room.agents.map(a => a.name).join(', '))}` : 'No teammate assigned'}</p>`}</div><div class="header-actions"><span class="connection"><span class="dot"></span><span id="connection-text">Connecting…</span></span><span class="tag">${room.status === 'open' ? 'Open' : 'Closed'}</span>${state.calls && room.status==='open' ? `${iconButton('phone', 'voice-call', 'Start voice call')}${iconButton('video', 'video-call', 'Start video call')}` : ''}${state.me.role === 'agent' ? iconButton('note', 'client-notes', 'View client notes') : ''}${iconButton('settings', 'settings', 'Settings')}${state.me.role === 'admin' ? iconButton('more', 'room-settings', 'Conversation settings') : ''}</div></header><div id="notification-banner"></div><div class="messages" id="messages" role="log" aria-label="Conversation messages" aria-live="polite"></div><div class="composer-wrap">${room.status === 'open' ? `<form class="composer" id="message-form"><div id="file-preview" class="file-preview hidden"></div><label class="hidden" for="message-input">Message</label><div class="composer-row"><div class="composer-field">${iconButton('clip', 'attach', 'Attach a file')}<textarea id="message-input" placeholder="Message" rows="1" maxlength="10000"></textarea>${state.calls ? iconButton('camera', 'camera', 'Take a photo') : ''}</div><button class="send composer-record" id="record-button" type="button" data-action="record" aria-label="Record a voice note" title="Record a voice note">${icon('mic')}</button><button class="send hidden" id="send-button" type="submit" aria-label="Send message" title="Send message"><span class="hidden">Send</span>${icon('send')}</button></div><input type="file" id="file-input" class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,.mp3,.m4a,.ogg,.wav,.pdf,.doc,.docx,.txt,.csv"></form><div class="composer-footer">${client ? `<span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Securely connected</span>` : `<span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Private support room</span>`}</div>` : `<div class="settings-note">This conversation is closed. Your history and files are still available.</div>`}</div>`;
+  $('#conversation').innerHTML = `<header class="chat-header">${!client ? `<span class="mobile-back">${iconButton('back', 'back', 'Back to conversations')}</span>` : ''}${avatar}<div class="chat-title"><h2>${esc(displayName)}</h2>${client ? '' : `<p>${room.agents.length ? `Assigned to ${esc(room.agents.map(a => a.name).join(', '))}` : 'No teammate assigned'}</p>`}</div><div class="header-actions"><span class="connection"><span class="dot"></span><span id="connection-text">Connecting…</span></span><span class="tag">${room.status === 'open' ? 'Open' : 'Closed'}</span>${state.calls && room.status==='open' ? `${iconButton('phone', 'voice-call', 'Start voice call')}${iconButton('video', 'video-call', 'Start video call')}` : ''}${state.me.role === 'agent' ? iconButton('note', 'client-notes', 'View client notes') : ''}${iconButton('settings', 'settings', 'Settings')}${state.me.role === 'admin' ? iconButton('more', 'room-settings', 'Conversation settings') : ''}</div></header><div id="notification-banner"></div><div class="messages" id="messages" role="log" aria-label="Conversation messages" aria-live="polite"></div><div class="composer-wrap">${room.status === 'open' ? `<form class="composer" id="message-form"><div id="file-preview" class="file-preview hidden"></div><label class="hidden" for="message-input">Message</label><div class="composer-row"><div class="composer-field"><button class="icon-btn" type="button" data-action="emoji" aria-label="Emoji" title="Emoji" aria-expanded="false" aria-controls="emoji-picker">${icon('emoji')}</button><textarea id="message-input" placeholder="Message" rows="1" maxlength="10000"></textarea>${iconButton('clip', 'attach', 'Attach a file')}${state.calls ? iconButton('camera', 'camera', 'Take a photo') : ''}</div><button class="send composer-record" id="record-button" type="button" data-action="record" aria-label="Record a voice note" title="Record a voice note">${icon('mic')}</button><button class="send hidden" id="send-button" type="submit" aria-label="Send message" title="Send message"><span class="hidden">Send</span>${icon('send')}</button></div><div id="emoji-picker" class="emoji-picker" role="group" aria-label="Choose an emoji" hidden>${emojis.map(emoji => `<button type="button" data-emoji="${emoji}">${emoji}</button>`).join('')}</div><input type="file" id="file-input" class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,.mp3,.m4a,.ogg,.wav,.pdf,.doc,.docx,.txt,.csv"></form><div class="composer-footer">${client ? `<span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Securely connected</span>` : `<span>${icon('lock').replace('<svg ', '<svg width="9" height="9" ')} Private support room</span>`}</div>` : `<div class="settings-note">This conversation is closed. Your history and files are still available.</div>`}</div>`;
   const indicator = document.createElement('p'); indicator.id = 'typing-indicator'; indicator.className = 'hidden'; indicator.setAttribute('role', 'status'); indicator.setAttribute('aria-live', 'polite'); $('.composer-wrap').prepend(indicator);
   state.file = null; syncComposer(); renderMessages(); notificationBanner(); connection(state.connected); renderTyping(); reportActivity(true);
 }
@@ -245,12 +287,14 @@ function renderMessages(prepend = false, scrollToLatest = false) {
     const meta = message.own || continuation ? '' : `<div class="message-meta"><span>${esc(message.sender)}</span></div>`;
     const status = `<span class="message-status"><time datetime="${date.toISOString()}">${formatTime(message.created_at)}</time>${receipt ? deliveryMark(delivery, message.failed, message.id) : ''}</span>`;
     const canDelete = !message.pending && !deleted && (message.own || state.me.role === 'admin');
+    const canCopy = !message.pending && !deleted && Boolean(message.body);
+    const copy = canCopy ? `<button type="button" class="message-copy-trigger" data-copy-message="${esc(message.id)}" aria-label="Copy message" title="Copy message">${icon('copy')}</button>` : '';
     const remove = canDelete ? `<button type="button" class="message-delete-trigger" data-delete-options="${esc(message.id)}" aria-label="Delete message" title="Delete message">${icon('trash')}</button>` : '';
     const content = deleted ? `<span class="deleted-message">${icon('deleted')}<em>${message.deleted_by_me ? 'You deleted this message' : 'This message was deleted'}</em></span>` : `${message.body ? `<span class="message-body">${esc(message.body)}</span>` : ''}${attachment}`;
-    return `${divider}<article data-key="${key}" data-message-id="${esc(message.id)}" ${canDelete ? 'data-selectable="true" tabindex="0" aria-keyshortcuts="Shift+F10" title="Press and hold for message actions"' : ''} class="message ${continuation ? 'group-continuation' : 'group-start'} ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="message-content"><div class="bubble">${content}${status}</div>${remove}</div></article>`;
+    return `${divider}<article data-key="${key}" data-message-id="${esc(message.id)}" ${canDelete ? 'data-selectable="true"' : ''} ${canCopy ? 'data-copyable="true"' : ''} ${canDelete || canCopy ? 'tabindex="0" aria-keyshortcuts="Shift+F10" title="Press and hold for message actions"' : ''} class="message ${continuation ? 'group-continuation' : 'group-start'} ${message.own ? 'own' : ''} ${deleted ? 'deleted' : ''} ${imageMessage ? 'image-message' : ''} ${message.pending ? 'pending-message' : ''} ${message.failed ? 'send-failed' : ''}">${meta}<div class="message-content"><div class="bubble">${content}${status}</div>${copy}${remove}</div></article>`;
   }).join('');
   const template = document.createElement('template');
-  template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(clientName(room))}. Send a message to get started.`}</p></div>`}`;
+  template.innerHTML = `${state.hasMore ? '<button data-key="earlier" class="secondary load-earlier" data-action="earlier">Load earlier messages</button>' : ''}${rows || (!historyLoaded ? '<p data-key="loading" class="chat-intro" role="status">Loading messages…</p>' : `<div data-key="intro" class="chat-intro"><span class="avatar">${icon('chat')}</span><h3>You’re connected.</h3><p>${state.me.role === 'client' ? 'Send your first message or share a file. Your support team will take it from here.' : `This is your conversation with ${esc(clientName(room))}. Send a message to get started.`}</p></div>`)}`;
   // Keep existing media elements attached: a live message must not restart playing audio/video.
   const existing = new Map([...container.children].map(node => [node.dataset.key, node]));
   const freshNodes = [...template.content.children]; const keep = new Set();
@@ -280,29 +324,41 @@ function connection(connected) {
 }
 function notificationBanner() {
   if (!$('#notification-banner')) return;
-  const enabled = 'Notification' in window && Notification.permission === 'granted' && state.push?.devices > 0;
-  $('#notification-banner').innerHTML = enabled ? '' : `<div class="notification-banner">${icon('bell')}<p>${state.push?.enabled ? 'Stay in the loop. Enable notifications on this device for new messages.' : 'Live chat is ready. Background alerts need server push configuration.'}</p><button class="secondary" data-action="settings">${state.push?.enabled ? 'Enable alerts' : 'Details'}</button></div>`;
+  const enabled = 'Notification' in window && Notification.permission === 'granted' && Boolean(pushEndpoint);
+  $('#notification-banner').innerHTML = enabled ? '' : `<div class="notification-banner">${icon('bell')}<p>${state.push?.enabled ? 'Stay in the loop. Enable notifications on this device for new messages.' : 'Live chat is ready. Background alerts need server push configuration.'}</p><button class="secondary" data-action="${state.push?.enabled ? 'enable-push' : 'settings'}">${state.push?.enabled ? 'Enable alerts' : 'Details'}</button></div>`;
 }
 async function loadMessages(roomId, before) {
+  const view = messageView, request = before ? null : ++latestRequest;
   const result = await api(`/api/rooms/${roomId}/messages${before ? `?before=${before}` : ''}`);
-  if (state.roomId !== roomId) return;
+  if (state.roomId !== roomId || view !== messageView || (!before && request !== latestRequest)) return;
   const oldSignature = state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.deleted_at || ''}:${m.deleted_by_me || ''}:${m.delivery || ''}`).join(',');
-  if (before) state.messages = [...result.messages, ...state.messages];
+  if (before) {
+    const existing = new Set(state.messages.map(message => message.id));
+    state.messages = [...result.messages.filter(message => !existing.has(message.id)), ...state.messages];
+  }
   else {
+    historyLoaded = true;
     // Retain previously loaded pages when realtime refresh fetches the most recent page.
     const first = result.messages[0]?.seq || 0;
     state.messages = [...(result.hasMore ? state.messages.filter(m => m.seq < first) : []), ...result.messages];
   }
   if (before || state.messages.length <= 100) state.hasMore = result.hasMore;
   const savedIds = new Set(state.messages.map(message => message.id));
+  const ownNonces = new Set(state.messages.filter(message => message.own).map(message => message.nonce));
   state.pendingMessages = state.pendingMessages.filter(message => {
-    if (!message.serverId || !savedIds.has(message.serverId)) return true;
-    if (message.localUrl) URL.revokeObjectURL(message.localUrl); return false;
+    if (message.roomId !== roomId || !(savedIds.has(message.serverId) || ownNonces.has(message.nonce))) return true;
+    if (message.localUrl) URL.revokeObjectURL(message.localUrl);
+    return false;
   });
   if (oldSignature !== state.messages.map(m => `${m.id}:${Boolean(m.attachment_expired)}:${m.deleted_at || ''}:${m.deleted_by_me || ''}:${m.delivery || ''}`).join(',') || !$('#messages')?.querySelector('.message')) renderMessages(Boolean(before));
-  if (chatIsVisible(roomId) && state.messages.length) {
-    await post(`/api/rooms/${roomId}/read`, { seq: state.messages.at(-1).seq });
-    const room = selectedRoom(); if (room) room.unread = 0; renderList();
+  const seq = state.messages.at(-1)?.seq;
+  if (chatIsVisible(roomId) && seq > readSeq) {
+    readSeq = seq;
+    void post(`/api/rooms/${roomId}/read`, { seq }).then(() => {
+      if (view !== messageView || seq !== readSeq) return;
+      const room = selectedRoom();
+      if (room?.unread) { room.unread = 0; renderList(); }
+    }).catch(() => { if (view === messageView && seq === readSeq) readSeq = 0; });
   }
 }
 async function selectRoom(roomId) {
@@ -311,44 +367,75 @@ async function selectRoom(roomId) {
   if (state.file || $('#message-input')?.value.trim()) {
     if (!confirm('Switch conversation and discard this unsent draft?')) return;
   }
+  messageView++; historyLoaded = false; readSeq = 0;
   state.roomId = roomId; state.messages = []; state.hasMore = false;
   history.replaceState(null, '', state.me.role === 'client' ? `/c/${roomId}` : `/?room=${roomId}`);
   renderList(); renderChat(); await loadMessages(roomId);
 }
+function refreshError(error) {
+  if (error.status === 401) auth('Your access changed. Please sign in again.');
+  else connection(false);
+}
+function refreshCurrentMessages() {
+  const actor = state.me, roomId = state.roomId, view = messageView;
+  if (!roomId) return Promise.resolve();
+  if (messageRefresh?.view === view) {
+    messageRefresh.queued = true;
+    return messageRefresh.promise;
+  }
+  const update = { view, queued: false };
+  messageRefresh = update;
+  update.promise = (async () => {
+    do {
+      update.queued = false;
+      try { await loadMessages(roomId); }
+      catch (error) {
+        if (state.me === actor && view === messageView && error.status !== 404) refreshError(error);
+      }
+    } while (update.queued && state.me === actor && view === messageView);
+  })().finally(() => { if (messageRefresh === update) messageRefresh = null; });
+  return update.promise;
+}
 async function refresh() {
   if (!state.me) return;
-  if (state.loading) { state.queuedRefresh = true; return; } state.loading = true;
+  const messages = refreshCurrentMessages();
+  if (state.loading) { state.queuedRefresh = true; return messages; }
+  state.loading = true;
+  const actor = state.me;
   try {
-    state.rooms = await api('/api/rooms'); renderList(); void acknowledgeDeliveries(); void state.media?.sync();
-    if (state.roomId && !selectedRoom()) { state.roomId = null; state.messages = []; renderChat(); }
-    if (state.roomId) {
-      const closed = selectedRoom()?.status === 'closed';
-      if (closed !== !Boolean($('#message-form'))) renderChat();
-      await loadMessages(state.roomId);
+    const rooms = await api('/api/rooms');
+    if (state.me !== actor) return;
+    state.rooms = rooms; renderList(); void acknowledgeDeliveries(); void state.media?.sync();
+    if (state.roomId && !selectedRoom()) {
+      messageView++; historyLoaded = false; readSeq = 0; state.roomId = null; state.messages = []; renderChat();
+    } else if (state.roomId && (selectedRoom()?.status === 'closed') !== !Boolean($('#message-form'))) {
+      renderChat();
     }
-    if (state.me.role !== 'client') await refreshAlerts();
+    if (actor.role !== 'client') void refreshAlerts().catch(() => {});
   } catch (error) {
-    if (error.status === 401) auth('Your access changed. Please sign in again.');
-    else { connection(false); }
-  } finally { state.loading = false; if (state.queuedRefresh) { state.queuedRefresh = false; void refresh(); } }
+    if (state.me === actor) refreshError(error);
+  } finally {
+    state.loading = false;
+    if (state.queuedRefresh) { state.queuedRefresh = false; void refresh(); }
+  }
+  await messages;
+}
+function scheduleRefresh() {
+  if (!refreshTimer) refreshTimer = setTimeout(() => { refreshTimer = null; void refresh(); }, 75);
 }
 async function startEvents() {
   state.stream?.close();
   if (state.realtime) {
     try {
       const { connect } = await import('/realtime.js');
-      state.stream = connect(state.realtime, () => {
-        clearTimeout(refreshTimer); refreshTimer = setTimeout(() => void refresh(), 100);
-      }, status => { connection(status === 'SUBSCRIBED'); if (status === 'SUBSCRIBED') { reportActivity(true); void refresh(); } }, receiveTyping);
+      state.stream = connect(state.realtime, scheduleRefresh, status => { connection(status === 'SUBSCRIBED'); if (status === 'SUBSCRIBED') { reportActivity(true); void refresh(); } }, receiveTyping);
     } catch { connection(false); }
     return;
   }
   const stream = new EventSource('/api/events'); state.stream = stream;
   stream.addEventListener('typing', event => { try { receiveTyping(JSON.parse(event.data)); } catch {} });
   stream.addEventListener('connected', () => { connection(true); void refresh(); });
-  for (const type of ['change', 'alert']) stream.addEventListener(type, () => {
-    clearTimeout(refreshTimer); refreshTimer = setTimeout(() => void refresh(), 100);
-  });
+  for (const type of ['change', 'alert']) stream.addEventListener(type, scheduleRefresh);
   stream.onerror = () => connection(false);
 }
 async function unlockCallSound() {
@@ -396,46 +483,79 @@ async function boot() {
       const result = await post('/api/client/session', { key });
       history.replaceState(null, '', `/c/${result.roomId}`);
     }
-    const result = await api('/api/me'); state.me = result.user; state.push = result.push; state.realtime = result.realtime; state.calls=result.calls;
-    state.media?.close();state.media=null;
-    if(result.calls){const {installMedia}=await import('/chat-media.js');state.media=installMedia({api,post,config:result.calls,room:id=>{const r=state.rooms.find(x=>x.id===id);return r?{...r,code:state.me?.role==='client'?'Wingfactor Support':clientName(r)}:null;},preview:previewFile,modal,dismiss,toast,recording:()=>state.recorder?.state==='recording',ring:playCallRingtone});}
-    state.rooms = await api('/api/rooms'); void acknowledgeDeliveries();
+    const [result, rooms] = await Promise.all([api('/api/me'), api('/api/rooms')]);
+    state.me = result.user; state.push = result.push; state.realtime = result.realtime; state.calls = result.calls;
+    state.media?.close(); state.media = null; pushEndpoint = '';
+    messageView++; historyLoaded = false; readSeq = 0; state.messages = []; state.hasMore = false;
+    state.rooms = rooms;
     state.roomId = state.me.role === 'client' ? state.me.roomId : new URLSearchParams(location.search).get('room');
     if (!selectedRoom()) state.roomId = null;
-    workspace(); if (state.roomId) await loadMessages(state.roomId);
-    if ('serviceWorker' in navigator) {
-      try {
-        const registration = await navigator.serviceWorker.register('/sw.js');
-        const subscription = await registration.pushManager?.getSubscription();
-        if (subscription && 'Notification' in window && Notification.permission === 'granted' && state.push.enabled) {
-          await post('/api/push', { subscription: subscription.toJSON() });
-          state.push.devices = 1; notificationBanner();
-        }
-      } catch {
-        toast('Chat is ready. Check notification settings to enable background alerts.');
-      }
-    }
-    startEvents();
+    const actor = state.me, view = messageView;
+    workspace();
+    if (state.roomId) void loadMessages(state.roomId).catch(error => {
+      if (state.me === actor && view === messageView) { refreshError(error); if (state.me) {
+        $('#messages')?.querySelector('[data-key="loading"]')?.replaceChildren('Could not load messages. Reconnecting…');
+        toast(error.message);
+      } }
+    });
+    void startEvents();
+    void acknowledgeDeliveries();
+    if (result.calls) void import('/chat-media.js').then(({installMedia}) => {
+      if (state.me !== actor) return;
+      state.media=installMedia({api,post,config:result.calls,room:id=>{const r=state.rooms.find(x=>x.id===id);return r?{...r,code:state.me?.role==='client'?'Wingfactor Support':clientName(r)}:null;},preview:previewFile,modal,dismiss,toast,recording:()=>state.recorder?.state==='recording',ring:playCallRingtone});
+      void state.media.sync();
+    }).catch(() => { if (state.me === actor) toast('Voice, video and camera controls could not load. Refresh and try again.'); });
+    if ('serviceWorker' in navigator) void restorePush(actor);
   } catch (error) { auth(error.status === 401 && !location.pathname.startsWith('/c/') ? '' : error.message); }
+}
+async function pushWorker() {
+  pushRegistration ||= navigator.serviceWorker.register('/sw.js').catch(error => {
+    pushRegistration = null;
+    throw error;
+  });
+  const registration = await pushRegistration;
+  if (registration.active || !('active' in registration)) return registration;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Notifications could not start. Reload this page and try again.')), 8000);
+    navigator.serviceWorker.ready.then(ready => { clearTimeout(timeout); resolve(ready); }, error => { clearTimeout(timeout); reject(error); });
+  });
+}
+function pushKey() {
+  const base64 = state.push.publicKey.replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(base64), char => char.charCodeAt(0));
+}
+function matchesPushKey(subscription, key) {
+  const existing = subscription?.options?.applicationServerKey;
+  return !existing || (existing.byteLength === key.byteLength && new Uint8Array(existing).every((value, index) => value === key[index]));
+}
+async function restorePush(actor) {
+  try {
+    const registration = await pushWorker();
+    if (state.me !== actor || !state.push.enabled || window.Notification?.permission !== 'granted') return;
+    const subscription = await registration.pushManager?.getSubscription();
+    if (!subscription || !matchesPushKey(subscription, pushKey()) || state.me !== actor) return;
+    await post('/api/push', { subscription: subscription.toJSON() });
+    if (state.me === actor) { pushEndpoint = subscription.endpoint; notificationBanner(); }
+  } catch { /* The enable button can retry and display the error. */ }
 }
 async function enablePush() {
   if (!state.push.enabled) throw new Error('Background push is not configured on the server yet.');
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) throw new Error('This browser does not support background push. Use a supported browser; on iPhone, add the app to your Home Screen.');
-  const permission = await Notification.requestPermission();
-  if (permission !== 'granted') throw new Error('Allow notifications in your browser/site settings, then try again.');
-  const registration = await navigator.serviceWorker.ready;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !window.Notification) throw new Error('This browser does not support background push. On iPhone, open the app from your Home Screen.');
+  const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error('Allow notifications in your browser’s site settings, then try again.');
+  const registration = await pushWorker();
+  const key = pushKey();
   let subscription = await registration.pushManager.getSubscription();
-  if (!subscription) {
-    const base64 = state.push.publicKey.replace(/-/g, '+').replace(/_/g, '/');
-    const key = Uint8Array.from(atob(base64), char => char.charCodeAt(0));
-    subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-  }
-  await post('/api/push', { subscription: subscription.toJSON() }); state.push.devices = 1;
-  notificationBanner(); toast('Notifications enabled. Send a test to check this device.'); showSettings();
+  if (subscription && !matchesPushKey(subscription, key)) { await subscription.unsubscribe(); subscription = null; }
+  subscription ||= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  await post('/api/push', { subscription: subscription.toJSON() });
+  pushEndpoint = subscription.endpoint;
+  notificationBanner(); toast('Notifications enabled. Send a test to check this device.');
+  if ($('#modal').open) showSettings();
 }
 function showSettings() {
   const permission = 'Notification' in window ? Notification.permission : 'unsupported';
-  modal('Your settings', `<div class="section-label">Appearance</div>${appearanceOptions()}<p class="appearance-note">Saved on this device.</p><div class="section-label">Notifications</div><p class="modal-description">Keep alerts enabled on every device you use for support.</p><div class="section-label">Notifications on this device</div><div class="settings-row"><span class="tag ${permission === 'granted' ? '' : 'waiting'}">${esc(permission === 'granted' && state.push.devices ? 'Enabled' : permission === 'denied' ? 'Blocked in browser' : 'Not enabled')}</span><button class="secondary" data-action="enable-push">Enable notifications</button><button class="secondary" data-action="test-push">Send test alert</button></div><div class="settings-note">Allow browser notifications and sound. Check your phone’s notification and battery settings if alerts are delayed. Delivery needs an internet connection.<br>${state.push.enabled ? '' : '<strong>Server setup needed:</strong> set PUSH_CONTACT before using background alerts.'}</div>${state.me.role !== 'client' ? `<div class="section-label">Your account</div><button class="secondary" data-action="password">Change password</button><div class="settings-note">You stay signed in on this device. Signing out, an admin revoking access, or clearing browser data will require a new login.<br>Unanswered client messages: teammate reminder at 5 minutes, admin alert at 10 minutes.</div><div class="modal-actions"><button class="danger" data-action="logout">Sign out of this device</button></div>` : ''}`);
+  modal('Your settings', `<div class="section-label">Appearance</div>${appearanceOptions()}<p class="appearance-note">Saved on this device.</p><div class="section-label">Notifications</div><p class="modal-description">Keep alerts enabled on every device you use for support.</p><div class="section-label">Notifications on this device</div><div class="settings-row"><span class="tag ${permission === 'granted' ? '' : 'waiting'}">${esc(permission === 'granted' && pushEndpoint ? 'Enabled' : permission === 'denied' ? 'Blocked in browser' : 'Not enabled')}</span><button class="secondary" data-action="enable-push">Enable notifications</button><button class="secondary" data-action="test-push">Send test alert</button></div><div class="settings-note">Allow browser notifications and sound. Check your phone’s notification and battery settings if alerts are delayed. Delivery needs an internet connection.<br>${state.push.enabled ? '' : '<strong>Server setup needed:</strong> set PUSH_CONTACT before using background alerts.'}</div>${state.me.role !== 'client' ? `<div class="section-label">Your account</div><button class="secondary" data-action="password">Change password</button><div class="settings-note">You stay signed in on this device. Signing out, an admin revoking access, or clearing browser data will require a new login.<br>Unanswered client messages: teammate reminder at 5 minutes, admin alert at 10 minutes.</div><div class="modal-actions"><button class="danger" data-action="logout">Sign out of this device</button></div>` : ''}`);
 }
 async function showTeam() {
   state.users = await api('/api/users');
@@ -496,7 +616,8 @@ function previewFile(file, sendImmediately = false) {
 }
 async function sendPendingMessage(pending) {
   if (!pending || pending.sending || pending.serverId) return;
-  pending.sending = true; pending.failed = false; renderMessages(false, state.roomId === pending.roomId);
+  pending.sending = true;
+  if (pending.failed) { pending.failed = false; if (state.roomId === pending.roomId) renderMessages(false, true); }
   try {
     if (pending.file && !pending.attachmentId) {
       const uploaded = await api(`/api/rooms/${pending.roomId}/upload`, { method: 'POST', body: pending.file,
@@ -505,15 +626,21 @@ async function sendPendingMessage(pending) {
     }
     const sent = await post(`/api/rooms/${pending.roomId}/messages`, { body: pending.body,
       attachmentId: pending.attachmentId || null, nonce: pending.nonce });
-    pending.serverId = sent.id; pending.failed = false; pending.file = null; renderMessages();
-    await refresh();
+    pending.serverId = sent.id; pending.failed = false; pending.file = null;
+    if (state.roomId === pending.roomId) renderMessages();
+    scheduleRefresh();
   } catch (error) {
-    pending.failed = true; renderMessages(); toast(error.message);
+    if (state.pendingMessages.includes(pending)) {
+      pending.failed = true;
+      if (state.roomId === pending.roomId) renderMessages();
+      toast(error.message);
+    }
   } finally { pending.sending = false; }
 }
 async function acknowledgeDeliveries() {
   if (!state.me || !state.rooms.length) return;
-  const roomIds = state.me.role === 'client' ? [state.me.roomId] : state.rooms.map(room => room.id).slice(0, 500);
+  const roomIds = state.me.role === 'client' ? [state.me.roomId] : state.rooms.filter(room => room.unread > 0).map(room => room.id).slice(0, 500);
+  if (!roomIds.length) return;
   try { await post('/api/delivered', { roomIds }); } catch {}
 }
 async function record() {
@@ -593,7 +720,7 @@ document.addEventListener('submit', async event => {
 });
 function startMessagePress(target, point, pointerId) {
   cancelMessagePress();
-  const message = target?.closest?.('.message[data-selectable="true"]');
+  const message = target?.closest?.('.message:is([data-selectable="true"],[data-copyable="true"])');
   if (!message || !target.closest('.bubble') || target.closest('a,audio,video,input,button:not(.image-open)')) return;
   const press = { id: message.dataset.messageId, pointerId, x: point.clientX, y: point.clientY };
   press.timer = setTimeout(() => {
@@ -630,7 +757,7 @@ if (!window.PointerEvent) {
   });
 }
 document.addEventListener('contextmenu', event => {
-  const message = event.target.closest?.('.message[data-selectable="true"] .bubble');
+  const message = event.target.closest?.('.message:is([data-selectable="true"],[data-copyable="true"]) .bubble');
   if (!message || event.target.closest('audio,video,a')) return;
   const id = message.closest('.message').dataset.messageId;
   event.preventDefault(); cancelMessagePress(); selectMessage(id); suppressMessageClick = { id, until: Date.now() + 1000 };
@@ -638,7 +765,8 @@ document.addEventListener('contextmenu', event => {
 document.addEventListener('click', event => {
   const target = event.target.closest ? event.target : event.target.parentElement; if (!target) return;
   const message = target.closest('[data-message-id]');
-  if (!target.closest('[data-delete-options]') && suppressMessageClick && message && suppressMessageClick.id === message.dataset.messageId && Date.now() < suppressMessageClick.until) {
+  if (!target.closest('#emoji-picker,[data-action="emoji"]')) showEmojis(false);
+  if (!target.closest('[data-delete-options],[data-copy-message]') && suppressMessageClick && message && suppressMessageClick.id === message.dataset.messageId && Date.now() < suppressMessageClick.until) {
     suppressMessageClick = null; event.preventDefault(); event.stopImmediatePropagation(); return;
   }
   if (state.selectedMessageId && !target.closest('#modal') && message?.dataset.messageId !== state.selectedMessageId) clearMessageSelection();
@@ -652,6 +780,8 @@ document.addEventListener('click', async event => {
   try {
     if (button.dataset.room) return await selectRoom(button.dataset.room);
     if (button.dataset.alertRoom) { dismiss(); return await selectRoom(button.dataset.alertRoom); }
+    if (button.dataset.emoji) { insertEmoji(button.dataset.emoji); return; }
+    if (button.dataset.copyMessage) { await copyMessage(button.dataset.copyMessage); return; }
     if (button.dataset.openImage) { openMessageImage(button.dataset.openImage); return; }
     if (button.dataset.deleteOptions) {
       const message = state.messages.find(item => item.id === button.dataset.deleteOptions);
@@ -688,11 +818,19 @@ document.addEventListener('click', async event => {
     switch (button.dataset.action) {
       case 'clear-message-selection': clearMessageSelection(); break;
       case 'close-modal': dismiss(); break;
-      case 'back': state.media?.closeCamera(); if (state.recorder?.state === 'recording') throw new Error('Stop your recording first.'); state.roomId = null; renderChat(); break;
+      case 'back': state.media?.closeCamera(); if (state.recorder?.state === 'recording') throw new Error('Stop your recording first.'); messageView++; historyLoaded = false; readSeq = 0; state.roomId = null; renderChat(); break;
       case 'conversations': $('.layout').classList.remove('has-room'); stopTyping(); break;
       case 'settings': showSettings(); break;
-      case 'enable-push': await enablePush(); break;
-      case 'test-push': toast((await post('/api/push/test')).message); break;
+      case 'emoji': showEmojis($('#emoji-picker').hidden); break;
+      case 'enable-push':
+        button.disabled = true;
+        try { await enablePush(); } finally { button.disabled = false; }
+        break;
+      case 'test-push':
+        if (!pushEndpoint) throw new Error('Enable notifications on this device first.');
+        button.disabled = true;
+        try { toast((await post('/api/push/test', { endpoint: pushEndpoint })).message); } finally { button.disabled = false; }
+        break;
       case 'team': await showTeam(); break;
       case 'alerts': await showAlerts(); break;
       case 'clear-alerts': await post('/api/alerts/read'); dismiss(); await refresh(); break;
@@ -755,8 +893,8 @@ window.addEventListener('resize', syncComposer);
 document.addEventListener('focusout', event => { if (event.target.id === 'message-input') stopTyping(); });
 document.addEventListener('change', event => { if (event.target.id === 'file-input' && event.target.files[0]) { previewFile(event.target.files[0]); event.target.value = ''; } });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') { clearMessageSelection(); return; }
-  const message = event.target.closest?.('.message[data-selectable="true"]');
+  if (event.key === 'Escape') { showEmojis(false); clearMessageSelection(); return; }
+  const message = event.target.closest?.('.message:is([data-selectable="true"],[data-copyable="true"])');
   if (message && (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey)) {
     event.preventDefault(); selectMessage(message.dataset.messageId); return;
   }
@@ -767,7 +905,7 @@ document.addEventListener('keydown', event => {
 document.addEventListener('visibilitychange', () => { stopTyping(); renderTyping(); if (!document.hidden && state.me) void refresh(); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', event => {
   if (event.data?.type === 'chat-visibility') event.ports[0]?.postMessage({ visible: chatIsVisible(event.data.roomId) });
-  if (event.data?.type === 'chat-message' && chatIsVisible(event.data.roomId)) void refresh();
+  if (event.data?.type === 'chat-message' && chatIsVisible(event.data.roomId)) scheduleRefresh();
   if (event.data?.type === 'incoming-call' && state.me) void state.media?.sync();
 });
 window.addEventListener('pagehide', () => {

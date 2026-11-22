@@ -26,11 +26,21 @@ self.addEventListener('push', event => {
       const index = visible.indexOf(true);
       if (index >= 0) { candidates[index].postMessage({ type: 'chat-message', roomId: payload.roomId }); return; }
     }
-    // Chat notifications stay visible but silent; sound and vibration are for calls only.
+    let { body, title } = payload;
+    if (chatMessage && payload.roomId && payload.messageId) {
+      try {
+        const preview = await fetch(`/api/rooms/${encodeURIComponent(payload.roomId)}/messages/${encodeURIComponent(payload.messageId)}`, {
+          credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(3000),
+        });
+        if (preview.status === 401 || preview.status === 403 || preview.status === 404) return;
+        if (preview.ok) ({ body, title } = await preview.json());
+      } catch { /* Display the generic alert when the preview cannot be reached. */ }
+    }
+    // Keep the existing silent message alerts and audible incoming calls.
     const tag = chatMessage && payload.roomId ? `chat-${payload.roomId}` : payload.tag || `support-${payload.kind || 'update'}`;
-    const title = String(payload.title || 'New chat notification');
+    title = String(title || 'New chat notification');
     await self.registration.showNotification(/wingfactor/i.test(title) ? title : `Wingfactor · ${title}`, {
-      body: payload.body, icon: '/icon.svg', badge: '/icon.svg',
+      body, icon: '/icon.svg', badge: '/icon.svg',
       tag, renotify: call, requireInteraction: call,
       ...(call ? { vibrate: [500, 200, 500, 200, 500] } : { silent: true }),
       data: { url: target.origin === self.location.origin ? target.href : self.location.origin },

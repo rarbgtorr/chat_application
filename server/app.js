@@ -40,7 +40,7 @@ function validPushEndpoint(endpoint) {
     const u = new URL(endpoint);
     return u.protocol === 'https:' && !u.username && !u.password && !u.port &&
       (u.hostname === 'fcm.googleapis.com' || u.hostname === 'updates.push.services.mozilla.com' ||
-        u.hostname.endsWith('.push.apple.com'));
+        u.hostname.endsWith('.push.apple.com') || u.hostname.endsWith('.notify.windows.com'));
   } catch { return false; }
 }
 
@@ -110,13 +110,16 @@ export function createApp(options = {}) {
       if (!roomId || canAccess(actor, roomId)) stream.res.write(`event: ${event}\ndata: ${JSON.stringify({ roomId })}\n\n`);
     }
   }
-  function notify({ userId = null, clientRoomId = null, roomId, kind, cycleId = null, title, message }) {
+  function notify({ userId = null, clientRoomId = null, roomId, kind, cycleId = null, title, message, messageId = null }) {
+    const muted = userId && get('SELECT 1 FROM notification_mutes WHERE room_id=? AND user_id=?', roomId, userId);
+    if (muted && !['reminder', 'escalation'].includes(kind)) return;
     if (userId) run('INSERT INTO alerts VALUES(?,?,?,?,?,?,?,0)', id(), roomId, userId, kind, cycleId, message, clock());
+    if (muted) return;
     const subs = userId
       ? all(`SELECT p.* FROM subscriptions p JOIN sessions s ON p.session_hash=s.token_hash WHERE s.user_id=?`, userId)
       : all(`SELECT p.* FROM subscriptions p JOIN sessions s ON p.session_hash=s.token_hash WHERE s.room_id=?`, clientRoomId);
     const payload = JSON.stringify({ title, body: message, url: clientRoomId ? `/c/${roomId}` : `/?room=${roomId}`,
-      tag: `${roomId}-${kind}`, roomId, kind });
+      tag: `${roomId}-${kind}`, roomId, kind, ...(messageId ? { messageId } : {}) });
     for (const sub of subs) run('INSERT INTO push_jobs VALUES(?,?,?,?,?,?,?,?,?)', id(), sub.endpoint,
       roomId, cycleId, kind, payload, clock(), 0, clock() + 24 * 60 * 60 * 1000);
   }
@@ -165,9 +168,6 @@ export function createApp(options = {}) {
         messageId, roomId, senderId, actor.role, value, attachmentId, now, data.nonce);
       if (actor.role === 'client') {
         run('INSERT OR IGNORE INTO cycles(room_id,first_message_id,first_at) VALUES(?,?,?)', roomId, messageId, now);
-        const recipients = agentIds(roomId);
-        for (const userId of recipients.length ? recipients : adminIds()) notify({ userId, roomId, kind: 'message',
-          title: `New message · ${room.code}`, message: 'A client sent a message or attachment.' });
       } else {
         const cycle = get('SELECT * FROM cycles WHERE room_id=?', roomId);
         if (cycle) {
@@ -175,9 +175,13 @@ export function createApp(options = {}) {
           run('UPDATE alerts SET seen=1 WHERE room_id=? AND cycle_id=?', roomId, cycle.first_message_id);
         }
         run('DELETE FROM cycles WHERE room_id=?', roomId);
-        notify({ clientRoomId: roomId, roomId, kind: 'reply', title: 'Wingfactor Support replied',
-          message: 'You have a new message in your support chat.' });
+        notify({ clientRoomId: roomId, roomId, kind: 'reply', title: 'Wingfactor Support',
+          message: 'You have a new message in your support chat.', messageId });
       }
+      const recipients = new Set([...adminIds(), ...agentIds(roomId)]);
+      const title = actor.role === 'client' ? get('SELECT name FROM client_private WHERE room_id=?', roomId)?.name || room.code : actor.name;
+      for (const userId of recipients) if (userId !== actor.id) notify({ userId, roomId, kind: 'message',
+        title, message: 'New message in your support chat.', messageId });
     });
     emit(roomId); void tick(); return get('SELECT * FROM messages WHERE id=?', messageId);
   }
@@ -228,7 +232,7 @@ export function createApp(options = {}) {
         const actor = principal(job.session_hash);
         if (!actor || (job.room_id && !canAccess(actor, job.room_id))) { run('DELETE FROM push_jobs WHERE id=?', job.id); return; }
         if (['message', 'reply'].includes(job.kind) && [...activity.values()].some(item => item.sessionHash === job.session_hash && item.roomId === job.room_id && item.expiresAt > clock())) {
-          const latest = get(`SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND deleted_at IS NULL AND ${actor.role === 'client' ? "sender_role IN ('admin','agent')" : "sender_role='client'"}`, job.room_id)?.n || 0;
+          const latest = get(`SELECT MAX(seq) AS n FROM messages WHERE room_id=? AND deleted_at IS NULL AND ${actor.role === 'client' ? "sender_role IN ('admin','agent')" : "sender_role IN ('client','admin','agent') AND sender_id!=?"}`, job.room_id, ...(actor.role === 'client' ? [] : [actor.id]))?.n || 0;
           const read = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', job.room_id, actor.role === 'client' ? `client:${job.room_id}` : actor.id)?.seq || 0;
           if (read >= latest) { run('DELETE FROM push_jobs WHERE id=?', job.id); return; }
         }
@@ -248,13 +252,16 @@ export function createApp(options = {}) {
     const marker = get('SELECT seq FROM read_markers WHERE room_id=? AND subject=?', room.id, subject)?.seq || 0;
     const last = get(`SELECT body,created_at,sender_role,attachment_id,deleted_at FROM messages WHERE room_id=? ORDER BY seq DESC LIMIT 1`, room.id);
     const unread = get(`SELECT COUNT(*) AS n FROM messages WHERE room_id=? AND seq>? AND
-      deleted_at IS NULL AND ${actor.role === 'client' ? "sender_role!='client'" : "sender_role='client'"}`, room.id, marker).n;
+      deleted_at IS NULL AND ${actor.role === 'client' ? "sender_role!='client'" : "sender_role IN ('client','admin','agent') AND sender_id!=?"}`, room.id, marker, ...(actor.role === 'client' ? [] : [actor.id])).n;
     const result = { ...room, last: last ? { ...last, body: last.deleted_at ? 'This message was deleted' : last.body || 'Attachment' } : null, unread,
       waitingSince: get('SELECT first_at FROM cycles WHERE room_id=?', room.id)?.first_at || null,
       agents: all(`SELECT u.id,u.name FROM users u JOIN assignments a ON a.user_id=u.id WHERE a.room_id=? AND u.disabled=0`, room.id) };
     if (actor.role !== 'client') {
       const details = get('SELECT name,contact,notes FROM client_private WHERE room_id=?', room.id);
-      if (actor.role === 'admin') result.private = details;
+      if (actor.role === 'admin') {
+        result.private = details;
+        result.notificationsMuted = Boolean(get('SELECT 1 FROM notification_mutes WHERE room_id=? AND user_id=?', room.id, actor.id));
+      }
       else result.client = { name: details?.name || '', notes: details?.notes || '' };
     }
     return result;
@@ -422,6 +429,21 @@ export function createApp(options = {}) {
         }); emit(roomId); return reply(201, { roomId, code, link: `${origin}/c/${roomId}#key=${key}` });
       }
       const messageMatch = /^\/api\/rooms\/([\w-]+)\/messages\/([\w-]+)$/.exec(path);
+      if (messageMatch && method === 'GET') {
+        const [, roomId, messageId] = messageMatch;
+        const room = roomAccess(actor, roomId);
+        ensure(!get('SELECT 1 FROM notification_mutes WHERE room_id=? AND user_id=?', roomId, actor.id), 404, 'Message not found.');
+        const message = get(`SELECT m.body,m.sender_role,m.sender_id,a.filename FROM messages m LEFT JOIN attachments a ON a.id=m.attachment_id
+          WHERE m.id=? AND m.room_id=? AND m.deleted_at IS NULL`, messageId, roomId);
+        ensure(message, 404, 'Message not found.');
+        let title = 'Wingfactor Support';
+        if (actor.role !== 'client') {
+          title = message.sender_role === 'client'
+            ? get('SELECT name FROM client_private WHERE room_id=?', roomId)?.name || room.code
+            : get('SELECT name FROM users WHERE id=?', message.sender_id)?.name || title;
+        }
+        return reply(200, { body: message.body || message.filename || 'Attachment', title });
+      }
       if (messageMatch && method === 'DELETE') {
         const roomId = messageMatch[1], messageId = messageMatch[2]; roomAccess(actor, roomId);
         const message = get('SELECT * FROM messages WHERE id=? AND room_id=?', messageId, roomId);
@@ -458,6 +480,13 @@ export function createApp(options = {}) {
         if (!action && method === 'PATCH') {
           admin(actor); const data = await jsonBody(req);
           transaction(() => {
+            if (data.notificationsMuted !== undefined) {
+              ensure(typeof data.notificationsMuted === 'boolean', 400, 'Invalid notification preference.');
+              if (data.notificationsMuted) {
+                run('INSERT OR IGNORE INTO notification_mutes VALUES(?,?)', roomId, actor.id);
+                run('DELETE FROM push_jobs WHERE room_id=? AND endpoint IN (SELECT p.endpoint FROM subscriptions p JOIN sessions s ON p.session_hash=s.token_hash WHERE s.user_id=?)', roomId, actor.id);
+              } else run('DELETE FROM notification_mutes WHERE room_id=? AND user_id=?', roomId, actor.id);
+            }
             if (data.status !== undefined) {
               ensure(['open', 'closed'].includes(data.status), 400, 'Invalid conversation status.');
               run('UPDATE rooms SET status=? WHERE id=?', data.status, roomId);
@@ -591,7 +620,9 @@ export function createApp(options = {}) {
       if (path === '/api/push/test' && method === 'POST') {
         ensure(pushReady, 503, 'Push is not configured on the server.');
         limited(`push-test:${actor.sessionHash}`, 5, 60000);
-        const subs = all('SELECT * FROM subscriptions WHERE session_hash=?', actor.sessionHash);
+        const { endpoint } = await jsonBody(req);
+        const subs = all('SELECT * FROM subscriptions WHERE session_hash=?', actor.sessionHash)
+          .filter(sub => endpoint === undefined || sub.endpoint === endpoint);
         ensure(subs.length, 400, 'Enable notifications on this device first.');
         for (const sub of subs) run('INSERT INTO push_jobs VALUES(?,?,?,?,?,?,?,?,?)', id(), sub.endpoint,
           null, null, 'test', JSON.stringify({ title: 'Notifications are working', body: 'This device can receive support chat alerts.', url: '/', tag: 'test' }), clock(), 0, clock() + 60000);

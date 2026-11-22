@@ -5,11 +5,11 @@ import { runInNewContext } from 'node:vm';
 import { MessageChannel } from 'node:worker_threads';
 
 const script = await readFile(new URL('../public/sw.js', import.meta.url), 'utf8');
-function worker(windows = []) {
+function worker(windows = [], preview) {
   const handlers = {}, shown = [], delivered = [];
   runInNewContext(script, {
-    URL, MessageChannel, setTimeout, clearTimeout,
-    fetch: async (...args) => { delivered.push(args); },
+    URL, MessageChannel, setTimeout, clearTimeout, AbortSignal,
+    fetch: async (...args) => { if (args[0].endsWith('/delivered')) delivered.push(args); else return preview?.(...args); },
     self: {
       location: { origin: 'https://chat.example' },
       clients: { matchAll: async () => windows },
@@ -99,4 +99,22 @@ test('notification targets stay on this site and invalid URLs still show an aler
     await w.push({ title: 'New chat notification', url });
     assert.match(w.shown.at(-1).data.url, /^https:\/\/chat\.example\/?$/);
   }
+});
+
+
+test('message previews include the full text and suppress deleted or revoked messages', async () => {
+  const body = 'Full text across a long message.\n'.repeat(200);
+  let status = 200;
+  const w = worker([], async (url, options) => {
+    assert.match(url, /rooms\/room-one\/messages\/message-one$/);
+    assert.equal(options.credentials, 'include');
+    return { ok: status === 200, status, json: async () => ({ body, title: 'Member Name' }) };
+  });
+  const payload = { kind: 'message', roomId: 'room-one', messageId: 'message-one', title: 'Wingfactor Support' };
+  await w.push(payload);
+  assert.equal(w.shown[0].title, 'Wingfactor · Member Name');
+  assert.equal(w.shown[0].body, body);
+  status = 404;
+  await w.push(payload);
+  assert.equal(w.shown.length, 1);
 });
