@@ -171,9 +171,13 @@ test('senders delete their own messages for everyone and administrators can dele
 test('5-minute reminder and 10-minute admin escalation use the first unanswered message', async t => {
   const f = await fixture(t), room = await f.room();
   await f.subscribe('agent'); await f.subscribe('admin');
-  await f.message('client', room.roomId, 'Need help.'); await f.app.tick();
-  assert.equal(f.deliveries.filter(d => d.payload.title.startsWith('New message')).length, 1);
-  assert.equal(f.deliveries.find(d => d.payload.title.startsWith('New message')).payload.kind, 'message');
+  const first = await f.message('client', room.roomId, 'Need help.'); await f.app.tick();
+  const messagePushes = f.deliveries.filter(d => d.payload.kind === 'message');
+  assert.equal(messagePushes.length, 2);
+  assert.ok(messagePushes.every(d => d.payload.title === 'SECRET CLIENT NAME' && d.payload.messageId === first.data.id));
+  const preview = '/api/rooms/' + room.roomId + '/messages/' + first.data.id;
+  assert.deepEqual((await f.request('agent', preview)).data, { body: 'Need help.', title: 'SECRET CLIENT NAME' });
+  assert.equal((await f.request('other', preview)).status, 404);
   f.advance(4 * 60000); await f.message('client', room.roomId, 'Additional context.'); await f.app.tick();
   assert.equal(f.app.store.all("SELECT * FROM alerts WHERE kind='reminder'").length, 0);
   f.advance(60000); await f.app.tick();

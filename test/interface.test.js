@@ -15,7 +15,7 @@ const deleteMigration = await readFile(new URL('../supabase/migrations/202610200
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 async function until(predicate) { for (let n = 0; n < 100; n++) { if (predicate()) return; await delay(); } throw new Error('UI did not reach the expected state.'); }
 
-async function ui(t, { role = 'agent', link = false, uploadGate = null, messageGate = null, pointerEvents = true, serviceWorker = false, savedTheme = null, storageBlocked = false } = {}) {
+async function ui(t, { role = 'agent', link = false, uploadGate = null, messageGate = null, pointerEvents = true, serviceWorker = false, pushGate = null, savedTheme = null, storageBlocked = false } = {}) {
   const roomId = 'room123'; const calls = []; const messages = []; const alerts = [];
   const dom = new JSDOM(html, { url: `http://localhost:3000/${role === 'client' ? `c/${roomId}${link ? '#key=private-secret' : ''}` : '?room=room123'}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
@@ -29,7 +29,23 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null, messageG
   window.HTMLDialogElement.prototype.close = function () { this.open = false; };
   window.EventSource = class { constructor() { this.listeners = {}; window.testEventStream = this; } addEventListener(name, handler) { this.listeners[name] = handler; } close() {} };
   window.confirm = () => true;
-  if (serviceWorker) {
+  if (pushGate) {
+    window.Notification = { permission: 'default', requestPermission: async () => {
+      window.Notification.permission = 'granted'; return 'granted';
+    } };
+    window.PushManager = class {};
+    const worker = new window.EventTarget();
+    const endpoint = 'https://test.notify.windows.com/push';
+    let subscription = null;
+    worker.register = async () => {
+      await pushGate;
+      return { active: true, pushManager: {
+        getSubscription: async () => subscription,
+        subscribe: async () => (subscription = { endpoint, toJSON: () => ({ endpoint }) }),
+      } };
+    };
+    Object.defineProperty(window.navigator, 'serviceWorker', { value: worker });
+  } else if (serviceWorker) {
     const worker = new window.EventTarget(); worker.register = async () => ({ pushManager: { getSubscription: async () => null } });
     Object.defineProperty(window.navigator, 'serviceWorker', { value: worker });
   }
@@ -44,7 +60,7 @@ async function ui(t, { role = 'agent', link = false, uploadGate = null, messageG
     const data = options.body && !(options.body instanceof window.Blob) ? JSON.parse(options.body) : null;
     calls.push({ path, method: options.method || 'GET', data });
     let result;
-    if (path === '/api/me') result = { user: { id: role === 'client' ? roomId : 'agent123', name: 'Support teammate', role, roomId: role === 'client' ? roomId : undefined }, push: { enabled: false, devices: 0 } };
+    if (path === '/api/me') result = { user: { id: role === 'client' ? roomId : 'agent123', name: 'Support teammate', role, roomId: role === 'client' ? roomId : undefined }, push: { enabled: Boolean(pushGate), devices: 0, publicKey: 'AQID' } };
     else if (path === '/api/rooms') result = rooms.map(item => ({ ...item }));
     else if (path.startsWith('/api/rooms/') && options.method === 'PATCH') {
       Object.assign(rooms.find(item => item.id === path.split('/').at(-1)), data); result = { ok: true };
@@ -700,4 +716,38 @@ test('an open notifications panel clears escalations on the next server update',
   window.testEventStream.listeners.change();
   await until(() => document.querySelector('#alert-list').textContent.includes('All caught up.'));
   assert.equal(document.querySelector('#modal').open, true);
+});
+
+
+test('incoming text can be copied and emoji selection inserts into the draft', async t => {
+  const f = await ui(t, { role: 'client' });
+  let clipboard;
+  Object.defineProperty(f.window.navigator, 'clipboard', { value: { writeText: async value => { clipboard = value; } } });
+  f.messages.push({ id: 'support-copy', seq: 1, body: 'Line one\nLine two', sender: 'Wingfactor Support', own: false, created_at: Date.now() });
+  await f.window.refresh();
+  f.document.querySelector('[data-copy-message="support-copy"]').click();
+  await until(() => clipboard === 'Line one\nLine two');
+  const input = f.document.querySelector('#message-input');
+  input.value = 'First last'; input.setSelectionRange(6, 6);
+  f.document.querySelector('[data-action="emoji"]').click();
+  assert.equal(f.document.querySelector('#emoji-picker').hidden, false);
+  f.document.querySelector('[data-emoji]').click();
+  assert.equal(input.value, 'First 😀last');
+  assert.equal(f.document.querySelector('#emoji-picker').hidden, true);
+  assert.equal(f.document.querySelector('.composer-field [data-action="attach"]').previousElementSibling, input);
+});
+
+test('chat connects while push starts, then the desktop banner enables that device', async t => {
+  const { promise, resolve } = Promise.withResolvers();
+  const f = await ui(t, { role: 'client', pushGate: promise });
+  assert.ok(f.window.testEventStream);
+  const enable = f.document.querySelector('.notification-banner [data-action="enable-push"]');
+  enable.click();
+  await until(() => f.window.Notification.permission === 'granted');
+  assert.ok(enable.disabled);
+  resolve();
+  await until(() => !f.document.querySelector('.notification-banner'));
+  f.document.querySelector('.chat-header [data-action="settings"]').click();
+  f.document.querySelector('[data-action="test-push"]').click();
+  await until(() => f.calls.some(call => call.path.endsWith('/api/push/test') && call.data.endpoint === 'https://test.notify.windows.com/push'));
 });

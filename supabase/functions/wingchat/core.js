@@ -57,8 +57,10 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
   const items=await result(table('deletions').select('id').limit(100));
   if(items.length){const {error}=await db.storage.from(bucket).remove(items.map(x=>x.id));if(!error)await result(table('deletions').delete().in('id',items.map(x=>x.id)));}
  }
- async function worker(config){
-  await rpc('schedule');await rpc('calls_sweep');await cleanup();await result(table('activity').delete().lt('expires_at',clock()));
+ async function worker(config, dispatchOnly=false){
+  if(!dispatchOnly){
+   await rpc('schedule');await rpc('calls_sweep');await cleanup();await result(table('activity').delete().lt('expires_at',clock()));
+  }
   const jobs=await rpc('claim_jobs');
   await Promise.all((jobs||[]).map(async job=>{
    // Re-read after leasing: a reply or revocation may have cancelled the job meanwhile.
@@ -89,22 +91,6 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
  async function notificationsMuted(userId,roomId){
   const rows=await result(table('notification_mutes').select('room_id').eq('user_id',userId).eq('room_id',roomId).limit(1));
   return rows.length>0;
- }
- async function summary(a,room,mutedRooms){
-  const [last,marker,assigned,cycle]=await Promise.all([
-   result(table('messages').select('body,created_at,sender_role,attachment_id,deleted_at').eq('room_id',room.id).order('seq',{ascending:false}).limit(1)),
-   result(table('reads').select('seq').eq('room_id',room.id).eq('subject',a.role==='client'?'client:'+room.id:a.id)),agents(room.id),one('cycles','room_id',room.id)]);
-  const unread=table('messages').select('seq',{count:'exact',head:true}).eq('room_id',room.id).is('deleted_at',null).gt('seq',marker[0]?.seq||0);
-  if(a.role==='client')unread.neq('sender_role','client');
-  else unread.in('sender_role',['client','admin','agent']).neq('sender_id',a.id);
-  const count=await unread;
-  const r={...room,last:last[0]?{...last[0],body:last[0].deleted_at?'This message was deleted':last[0].body||'Attachment'}:null,unread:count.count||0,agents:assigned,waitingSince:cycle?.first_at||null};
-  if(a.role!=='client'){
-   const details=await one('contacts','room_id',room.id);
-   if(a.role==='admin'){r.private=details;r.notificationsMuted=mutedRooms.has(room.id);}
-   else r.client={name:details?.name||'',notes:details?.notes||''};
-  }
-  return r;
  }
  return async function handler(req){
   const headers=new Headers({'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'});
@@ -176,15 +162,7 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
     await Promise.all(changed.map(signal));return reply({ok:true});
    }
    if(path==='/rooms'){
-    if(method==='GET'){
-     let q=table('rooms').select('*').order('created_at',{ascending:false});
-     if(a.role==='client')q=q.eq('id',a.roomId);
-     else if(a.role!=='admin'){const assigned=await result(table('assignments').select('room_id').eq('user_id',a.id));if(!assigned.length)return reply([]);q=q.in('id',assigned.map(x=>x.room_id));}
-     const [rooms,mutes]=await Promise.all([result(q),a.role==='admin'
-      ? result(table('notification_mutes').select('room_id').eq('user_id',a.id)) : []]);
-     const mutedRooms=new Set(mutes.map(m=>m.room_id));
-     return reply(await Promise.all(rooms.map(r=>summary(a,r,mutedRooms))));
-    }
+    if(method==='GET')return reply(await rpc('room_summaries',{p_token:a.sessionHash}));
     if(method==='POST'){
      admin(a);const d=await json(req),roomId=id(),key=secret(),code='Client #'+secret().slice(0,6).toUpperCase();const chosen=d.agentIds||[];check(Array.isArray(chosen)&&chosen.length<=50,400,'Invalid teammates.');
      for(const uid of chosen){const u=await one('users','id',uid);check(u&&u.role==='agent'&&!u.disabled,400,'Choose active teammates.');}
@@ -195,6 +173,12 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
     }
    }
    const messageMatch=/^\/rooms\/([\w-]+)\/messages\/([\w-]+)$/.exec(path);
+   if(messageMatch&&method==='GET'){
+    const [,roomId,messageId]=messageMatch;
+    const message=await rpc('notification_body',{p_token:a.sessionHash,p_room:roomId,p_message:messageId});
+    check(message,404,'Message not found.');
+    return reply(message);
+   }
    if(messageMatch&&method==='DELETE'){
     const roomId=messageMatch[1],messageId=messageMatch[2];await access(a,roomId);
     await rpc('message_delete',{p_token:a.sessionHash,p_room:roomId,p_message:messageId});await cleanup();waitUntil(worker(config));return reply({ok:true,deletedAt:clock()});
@@ -218,19 +202,25 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
     }
     if(action==='messages'&&method==='GET'){
      const before=Number(new URL(req.url).searchParams.get('before'))||Number.MAX_SAFE_INTEGER;
-     const rows=await result(table('messages').select('*').eq('room_id',roomId).lt('seq',before).order('seq',{ascending:false}).limit(100));
-     const fileIds=rows.map(m=>m.attachment_id).filter(Boolean);const files=fileIds.length?await result(table('attachments').select('id,filename,mime,size,expired,expires_at').in('id',fileIds)):[];
-     const clientLabel=a.role==='client'?room.code:(await one('contacts','room_id',roomId))?.name||room.code;const receipts=a.role==='client'?await receiptState(roomId):await clientReceiptState(roomId);
-     return reply({messages:rows.reverse().map(m=>{const f=files.find(f=>f.id===m.attachment_id);const viewerId=a.role==='client'?roomId:a.id;const own=m.sender_id===viewerId;const delivery=own&&!m.deleted_at&&m.sender_role!=='system'?(receipts.read>=m.seq?'read':receipts.delivered>=m.seq?'delivered':'sent'):undefined;const {deleted_by:deletedBy,...message}=m;return {...message,...(f?{filename:f.filename,mime:f.mime,size:f.size,attachment_expired:f.expired||f.expires_at<=clock()}:{}),...(delivery?{delivery}:{}),deleted_by_me:Boolean(m.deleted_at&&deletedBy===viewerId),own,sender:m.sender_role==='client'?clientLabel:'Wingfactor Support'};}),hasMore:rows.length===100});
+     const [rows,contact,receipts]=await Promise.all([
+      result(table('messages').select('*').eq('room_id',roomId).lt('seq',before).order('seq',{ascending:false}).limit(100)),
+      a.role==='client'?null:one('contacts','room_id',roomId),
+      a.role==='client'?receiptState(roomId):clientReceiptState(roomId)
+     ]);
+     const fileIds=rows.map(m=>m.attachment_id).filter(Boolean);
+     const files=new Map(fileIds.length?(await result(table('attachments').select('id,filename,mime,size,expired,expires_at').in('id',fileIds))).map(file=>[file.id,file]):[]);
+     const clientLabel=contact?.name||room.code;
+     return reply({messages:rows.reverse().map(m=>{const f=files.get(m.attachment_id);const viewerId=a.role==='client'?roomId:a.id;const own=m.sender_id===viewerId;const delivery=own&&!m.deleted_at&&m.sender_role!=='system'?(receipts.read>=m.seq?'read':receipts.delivered>=m.seq?'delivered':'sent'):undefined;const {deleted_by:deletedBy,...message}=m;return {...message,...(f?{filename:f.filename,mime:f.mime,size:f.size,attachment_expired:f.expired||f.expires_at<=clock()}:{}),...(delivery?{delivery}:{}),deleted_by_me:Boolean(m.deleted_at&&deletedBy===viewerId),own,sender:m.sender_role==='client'?clientLabel:'Wingfactor Support'};}),hasMore:rows.length===100});
     }
     if(action==='messages'&&method==='POST'){
      await limit('message:'+a.sessionHash,120);const d=await json(req);check(typeof d.nonce==='string'&&/^[\w-]{10,100}$/.test(d.nonce),400,'Missing message identifier.');const value=str(d.body,10000);check(value||d.attachmentId,400,'Write a message or attach a file.');
-     const message=await rpc('message',{p_token:a.sessionHash,p_room:roomId,p_id:id(),p_body:value,p_file:d.attachmentId||null,p_nonce:d.nonce});waitUntil(worker(config));return reply(message,201);
+     const message=await rpc('message',{p_token:a.sessionHash,p_room:roomId,p_id:id(),p_body:value,p_file:d.attachmentId||null,p_nonce:d.nonce});waitUntil(worker(config,true));return reply(message,201);
     }
     if(action==='read'&&method==='POST'){
-     const d=await json(req);const latest=await result(table('messages').select('seq').eq('room_id',roomId).order('seq',{ascending:false}).limit(1));const seq=Math.max(0,Math.min(latest[0]?.seq||0,Number(d.seq)||0));
-     const subject=a.role==='client'?'client:'+roomId:a.id;const old=await result(table('reads').select('seq').eq('room_id',roomId).eq('subject',subject));const previous=old[0]?.seq||0;await result(table('reads').upsert({room_id:roomId,subject,seq:Math.max(seq,previous)}));
-     if(a.role!=='client')await result(table('alerts').update({seen:true}).eq('room_id',roomId).eq('user_id',a.id).in('kind',['message','assigned']));if(seq>previous)await signal(roomId);return reply({ok:true});
+     const d=await json(req);
+     const seq=Number(d.seq);
+     await rpc('mark_read',{p_token:a.sessionHash,p_room:roomId,p_seq:Number.isSafeInteger(seq)&&seq>0?seq:0});
+     return reply({ok:true});
     }
     if(action==='upload'&&method==='POST'){
      check(room.status==='open',409,'Conversation is closed.');await limit('upload:'+a.sessionHash,20);const filename=str(decodeURIComponent(req.headers.get('x-filename')||''),200).replace(/[\x00-\x1f\\/]/g,'_');const ext=filename.split('.').at(-1).toLowerCase();let mime=types[ext];if(ext==='webm'&&req.headers.get('content-type')?.startsWith('audio/webm'))mime='audio/webm';check(mime,415,'Unsupported file type.');check((+req.headers.get('content-length')||0)<=26214400,413,'Maximum attachment size is 25 MB.');
@@ -253,12 +243,15 @@ export function createHandler({db,webpush,supabaseUrl,waitUntil=fn=>fn.catch(()=
    }
    if(path==='/alerts/read'&&method==='POST'){check(a.role!=='client',403,'Staff only.');await patch('alerts','user_id',a.id,{seen:true});return reply({ok:true});}
    if(path==='/push'&&method==='POST'){
-    const d=await json(req),s=d.subscription;let u;try{u=new URL(s?.endpoint);}catch{}check(u&&u.protocol==='https:'&&!u.port&&!u.username&&!u.password&&(u.hostname==='fcm.googleapis.com'||u.hostname==='updates.push.services.mozilla.com'||u.hostname.endsWith('.push.apple.com'))&&s.endpoint.length<=2048&&/^[\w-]{20,30}$/.test(s.keys?.auth)&&/^[\w-]{80,100}$/.test(s.keys?.p256dh),400,'Invalid browser push subscription.');
+    const d=await json(req),s=d.subscription;let u;try{u=new URL(s?.endpoint);}catch{}check(u&&u.protocol==='https:'&&!u.port&&!u.username&&!u.password&&(u.hostname==='fcm.googleapis.com'||u.hostname==='updates.push.services.mozilla.com'||u.hostname.endsWith('.push.apple.com')||u.hostname.endsWith('.notify.windows.com'))&&s.endpoint.length<=2048&&/^[\w-]{20,30}$/.test(s.keys?.auth)&&/^[\w-]{80,100}$/.test(s.keys?.p256dh),400,'Invalid browser push subscription.');
     const old=await one('subscriptions','endpoint',s.endpoint);if(old&&old.session_hash!==a.sessionHash)await remove('subscriptions','endpoint',s.endpoint);await result(table('subscriptions').upsert({endpoint:s.endpoint,subscription:s,session_hash:a.sessionHash,created_at:clock()}));return reply({ok:true});
    }
    if(path==='/push/test'&&method==='POST'){
-    await limit('test:'+a.sessionHash,5);const subs=await result(table('subscriptions').select('*').eq('session_hash',a.sessionHash));check(subs.length,400,'Enable notifications on this device first.');
-    await put('push_jobs',subs.map(s=>({endpoint:s.endpoint,kind:'test',payload:{title:'Notifications are working',body:'This device can receive support chat alerts.',url:'/',tag:'test'},next_at:clock(),expires_at:clock()+60000})));waitUntil(worker(config));return reply({ok:true,message:'Test queued. Confirm the notification appears on this device.'});
+    await limit('test:'+a.sessionHash,5);
+    const {endpoint}=await json(req);
+    const subs=(await result(table('subscriptions').select('*').eq('session_hash',a.sessionHash))).filter(sub=>endpoint===undefined||sub.endpoint===endpoint);
+    check(subs.length,400,'Enable notifications on this device first.');
+    await put('push_jobs',subs.map(s=>({endpoint:s.endpoint,kind:'test',payload:{title:'Notifications are working',body:'This device can receive support chat alerts.',url:'/',tag:'test'},next_at:clock(),expires_at:clock()+60000})));waitUntil(worker(config,true));return reply({ok:true,message:'Test queued. Confirm the notification appears on this device.'});
    }
    check(false,404,'Not found.');
   }catch(e){if(!e.status)console.error('Chat API request failed',e.code||e.name);return reply({error:e.status?e.message:'Something went wrong. Please try again.'},e.status||500);}
